@@ -1,0 +1,352 @@
+/**
+ * AI Uribo ローカル検証ハーネス
+ * GASのAPIをメモリ上に再現し、src/*.gs のロジックを実際に走らせて挙動を確認する。
+ * （Google環境が無い状態で論理バグを洗い出すのが目的。LINE送信は捕捉して出力するだけ）
+ */
+const fs = require('fs');
+const path = require('path');
+const vm = require('vm');
+const crypto = require('crypto');
+
+const SRC = path.join(__dirname, '..', 'src');
+const TZ_OFFSET_MS = 9 * 3600 * 1000;
+
+// ---- Sheet mock -------------------------------------------------------------
+class MockSheet {
+  constructor(name) { this.name = name; this.data = []; }
+  getName() { return this.name; }
+  _ensure(r, c) {
+    while (this.data.length < r) this.data.push([]);
+    for (const row of this.data) while (row.length < c) row.push('');
+  }
+  getLastRow() {
+    let last = 0;
+    this.data.forEach((row, i) => { if (row.some(v => v !== '' && v !== null && v !== undefined)) last = i + 1; });
+    return last;
+  }
+  getLastColumn() {
+    let last = 0;
+    this.data.forEach(row => row.forEach((v, i) => { if (v !== '' && v !== null && v !== undefined) last = Math.max(last, i + 1); }));
+    return last;
+  }
+  getMaxColumns() { return Math.max(this.getLastColumn(), 1); }
+  deleteColumns() { }
+  setFrozenRows() { return this; }
+  appendRow(values) {
+    const r = this.getLastRow() + 1;
+    this._ensure(r, values.length);
+    for (let c = 0; c < values.length; c++) this.data[r - 1][c] = values[c];
+    return this;
+  }
+  getRange(row, col, numRows = 1, numCols = 1) { return new MockRange(this, row, col, numRows, numCols); }
+}
+class MockRange {
+  constructor(sheet, row, col, numRows, numCols) {
+    Object.assign(this, { sheet, row, col, numRows, numCols });
+  }
+  getValues() {
+    const out = [];
+    for (let r = 0; r < this.numRows; r++) {
+      const row = [];
+      for (let c = 0; c < this.numCols; c++) {
+        const src = this.sheet.data[this.row - 1 + r] || [];
+        const v = src[this.col - 1 + c];
+        row.push(v === undefined ? '' : v);
+      }
+      out.push(row);
+    }
+    return out;
+  }
+  getDisplayValues() { return this.getValues().map(r => r.map(v => String(v === null || v === undefined ? '' : v))); }
+  setValues(values) {
+    this.sheet._ensure(this.row - 1 + values.length, this.col - 1 + values[0].length);
+    values.forEach((row, r) => row.forEach((v, c) => { this.sheet.data[this.row - 1 + r][this.col - 1 + c] = v; }));
+    return this;
+  }
+  setValue(v) { return this.setValues([[v]]); }
+  setNote() { return this; }
+  setFontWeight() { return this; }
+  setBackground() { return this; }
+}
+class MockBook {
+  constructor() { this.sheets = []; }
+  getId() { return 'MOCK_BOOK_ID'; }
+  getName() { return 'AI_Uribo_台帳'; }
+  getSheets() { return this.sheets; }
+  getSheetByName(n) { return this.sheets.find(s => s.name === n) || null; }
+  insertSheet(n) { const s = new MockSheet(n); this.sheets.push(s); return s; }
+  deleteSheet(s) { this.sheets = this.sheets.filter(x => x !== s); }
+}
+
+// ---- GAS globals ------------------------------------------------------------
+const book = new MockBook();
+const props = {};
+const cache = {};
+const pushes = [];   // LINE push
+const replies = [];  // LINE reply
+
+function formatDate(date, tz, fmt) {
+  const d = new Date(date.getTime() + TZ_OFFSET_MS);
+  const p = n => String(n).padStart(2, '0');
+  return fmt
+    .replace(/yyyy/g, d.getUTCFullYear())
+    .replace(/MM/g, p(d.getUTCMonth() + 1))
+    .replace(/dd/g, p(d.getUTCDate()))
+    .replace(/HH/g, p(d.getUTCHours()))
+    .replace(/mm/g, p(d.getUTCMinutes()))
+    .replace(/\bH\b/g, String(d.getUTCHours()))
+    .replace(/\bd\b/g, String(d.getUTCDate()));
+}
+
+const sandbox = {
+  console,
+  JSON, Math, String, Number, Object, Array, Date, RegExp, Error, isNaN, parseInt, parseFloat,
+  Logger: { log: (...a) => console.log('[Logger]', ...a) },
+  SpreadsheetApp: {
+    getActiveSpreadsheet: () => book,
+    openById: () => book,
+    getUi: () => { throw new Error('UI unavailable'); }
+  },
+  Utilities: {
+    formatDate,
+    getUuid: () => crypto.randomUUID(),
+    sleep: () => { },
+    newBlob: (s, type, name) => ({ name, setDataFromString: (str) => ({ name, str }) }),
+    computeHmacSha256Signature: (body, secret) => Array.from(crypto.createHmac('sha256', secret).update(body).digest()),
+    base64Encode: (bytes) => Buffer.from(bytes).toString('base64')
+  },
+  PropertiesService: {
+    getScriptProperties: () => ({
+      getProperty: k => (props[k] === undefined ? null : props[k]),
+      setProperty: (k, v) => { props[k] = v; }
+    })
+  },
+  CacheService: {
+    getScriptCache: () => ({
+      get: k => (cache[k] === undefined ? null : cache[k]),
+      put: (k, v) => { cache[k] = v; },
+      remove: k => { delete cache[k]; }
+    })
+  },
+  LockService: { getScriptLock: () => ({ tryLock: () => true, releaseLock: () => { } }) },
+  ScriptApp: {
+    getProjectTriggers: () => [],
+    deleteTrigger: () => { },
+    newTrigger: (fn) => {
+      const b = {
+        timeBased: () => b, atHour: () => b, everyDays: () => b, onWeekDay: () => b,
+        inTimezone: () => b, create: () => { sandbox.__triggers.push(fn); }
+      };
+      return b;
+    },
+    WeekDay: { SUNDAY: 'SUN', MONDAY: 'MON', TUESDAY: 'TUE', WEDNESDAY: 'WED', THURSDAY: 'THU', FRIDAY: 'FRI', SATURDAY: 'SAT' }
+  },
+  UrlFetchApp: {
+    fetch: (url, opts) => {
+      const payload = JSON.parse(opts.payload);
+      if (url.indexOf('/push') >= 0) pushes.push(payload); else replies.push(payload);
+      return { getResponseCode: () => 200, getContentText: () => '{}' };
+    }
+  },
+  ContentService: { createTextOutput: t => ({ text: t }) },
+  DriveApp: {
+    getRootFolder: () => mockFolder('root'),
+    getFileById: () => ({ makeCopy: () => ({}) })
+  },
+  Session: { getScriptTimeZone: () => 'Asia/Tokyo' },
+  __triggers: []
+};
+function mockFolder(name) {
+  const folders = {}, files = {};
+  const f = {
+    getName: () => name,
+    getFoldersByName: n => iter(folders[n] ? [folders[n]] : []),
+    createFolder: n => (folders[n] = mockFolder(n)),
+    getFolders: () => iter(Object.values(folders)),
+    getFilesByName: n => iter(files[n] ? [files[n]] : []),
+    createFile: blob => (files[blob.name] = { name: blob.name, setTrashed: () => { } }),
+    moveTo: () => { }, setTrashed: () => { }
+  };
+  return f;
+}
+function iter(arr) { let i = 0; return { hasNext: () => i < arr.length, next: () => arr[i++] }; }
+
+vm.createContext(sandbox);
+['config', 'db', 'log', 'notify', 'setup', 'autofill', 'detect', 'ask', 'batch', 'webhook', 'backup'].forEach(f => {
+  vm.runInContext(fs.readFileSync(path.join(SRC, f + '.gs'), 'utf8'), sandbox, { filename: f + '.gs' });
+});
+
+// ---- テスト実行 --------------------------------------------------------------
+const run = code => vm.runInContext(code, sandbox);
+let failures = 0;
+function check(label, cond, extra) {
+  console.log((cond ? '  OK   ' : '  NG   ') + label + (extra !== undefined && !cond ? ' → ' + JSON.stringify(extra) : ''));
+  if (!cond) failures++;
+}
+const rows = sheet => run(`findRows(SHEETS.${sheet})`);
+
+console.log('\n=== T1 台帳生成 ===');
+run('initSheets()');
+check('11シート生成', book.sheets.length === 11, book.sheets.map(s => s.name));
+check('S1に4名', rows('STAFF').length === 4);
+check('S3のCHK001が有効', run(`String(checkById_('CHK001')['有効'])`) === 'true');
+check('S3のCHK101は無効', run(`String(checkById_('CHK101')['有効'])`) === 'false');
+check('S8にmorning_batch_hour=10', run(`getSetting('morning_batch_hour')`) === '10');
+run('initSheets()');
+check('再実行しても増えない（冪等）', rows('STAFF').length === 4 && book.sheets.length === 11);
+
+console.log('\n=== T2 友だち追加とline_user_id記録 ===');
+props.LINE_CHANNEL_TOKEN = 'dummy-token';
+props.WEBHOOK_SECRET = 'k123';
+const post = (events) => run(`doPost(${JSON.stringify({ parameter: { k: 'k123' }, postData: { contents: JSON.stringify({ events }) } })})`);
+post([{ type: 'follow', webhookEventId: 'e1', source: { userId: 'U_FUJI' }, replyToken: 'r1' }]);
+check('名前確認のクイックリプライ', JSON.stringify(replies[0]).indexOf('お名前を教えてください') > 0);
+post([{ type: 'postback', webhookEventId: 'e2', source: { userId: 'U_FUJI' }, postback: { data: 'iam|STF001' }, replyToken: 'r2' }]);
+post([{ type: 'postback', webhookEventId: 'e3', source: { userId: 'U_HATT' }, postback: { data: 'iam|STF002' }, replyToken: 'r3' }]);
+const staff = rows('STAFF');
+check('藤原にline_user_id', staff[0].line_user_id === 'U_FUJI', staff[0]);
+check('服部にline_user_id', staff[1].line_user_id === 'U_HATT', staff[1]);
+
+console.log('\n=== T3 朝バッチ（シフト希望） ===');
+const today = run('todayStr_()');
+const dayNum = Number(today.substring(8, 10));
+run(`(function(){var r=findRow(SHEETS.SETTING,{'キー':'shift_request_day'});updateRow(SHEETS.SETTING,r._row,{'値':${dayNum}});
+     var r2=findRow(SHEETS.SETTING,{'キー':'shift_deadline_day'});updateRow(SHEETS.SETTING,r2._row,{'値':31});clearSettingCache();})()`);
+pushes.length = 0;
+console.log('  morningBatch → ' + run('morningBatch()'));
+const gaps = rows('GAP');
+check('S5に不足が登録される', gaps.length === 3, gaps.map(g => g.対象));       // 有効3名（岐部はFALSE）
+check('一次確認先は本人', gaps[0]['一次確認先staff_id'] === 'STF001', gaps[0]);
+check('LINE送信あり', pushes.length >= 1, pushes.length);
+check('1通目は見出し＋質問', pushes[0] && pushes[0].messages.length === 2, pushes[0] && pushes[0].messages);
+check('兼崎はline_user_id未登録で送信されない', pushes.length === 2, pushes.map(p => p.to));
+
+console.log('\n=== T4/T5 ボタン回答と一言記述 ===');
+const task1 = rows('TASK').find(t => t.送信先staff_id === 'STF001' && t.送信状態 === '送信済');
+replies.length = 0;
+post([{ type: 'postback', webhookEventId: 'e4', source: { userId: 'U_FUJI' }, postback: { data: 'ans|' + task1.task_id + '|今答える' }, replyToken: 'r4' }]);
+check('「今答える」で希望入力を促す', JSON.stringify(replies[0]).indexOf('希望をこのままメッセージ') > 0, replies[0]);
+post([{ type: 'message', webhookEventId: 'e5', source: { userId: 'U_FUJI' }, message: { type: 'text', text: '3日と10日は休み希望' }, replyToken: 'r5' }]);
+const t1after = run(`findRow(SHEETS.TASK,{'task_id':'${task1.task_id}'})`);
+check('S6に回答が記録される', String(t1after.回答).indexOf('3日と10日') > 0, t1after.回答);
+const gap1 = run(`findRow(SHEETS.GAP,{'gap_id':'${task1.gap_id}'})`);
+check('S5が完了になる', gap1.状態 === '完了' && !!gap1.完了日時, gap1);
+const fills = rows('FILL');
+check('S7補完台帳に転記', fills.length === 1 && String(fills[0].値).indexOf(run('nextMonthStr_(new Date())')) === 0, fills[0]);
+check('S4に対象月付きで記録（再検出防止）', rows('LOG_IMPORT').some(l => l.対象種別 === 'shift'), rows('LOG_IMPORT'));
+
+pushes.length = 0;
+console.log('  morningBatch再実行 → ' + run('morningBatch()'));
+check('回答済みは再検出されない', rows('GAP').length === 3, rows('GAP').length);
+check('同じ質問を二重送信しない', pushes.length === 0, pushes.length);
+
+console.log('\n=== T5b 「わからない」の扱い ===');
+const task2 = rows('TASK').find(t => t.送信先staff_id === 'STF002' && t.送信状態 === '送信済');
+replies.length = 0;
+post([{ type: 'postback', webhookEventId: 'e6', source: { userId: 'U_HATT' }, postback: { data: 'ans|' + task2.task_id + '|わからない' }, replyToken: 'r6' }]);
+post([{ type: 'message', webhookEventId: 'e7', source: { userId: 'U_HATT' }, message: { type: 'text', text: 'なし' }, replyToken: 'r7' }]);
+const gap2 = run(`findRow(SHEETS.GAP,{'gap_id':'${task2.gap_id}'})`);
+check('「わからない」は完了にしない', gap2.状態 === 'エスカレーション中', gap2);
+
+console.log('\n=== T6 週次ダイジェスト ===');
+pushes.length = 0;
+console.log('  weeklyDigest → ' + run('weeklyDigest()'));
+check('社員に集計が届く', pushes.length >= 1 && JSON.stringify(pushes[0]).indexOf('週次ダイジェスト') > 0);
+check('S10に週次集計が残る', rows('RUN_LOG').some(r => r.結果 === '週次集計'));
+
+console.log('\n=== T7 夜の確認セット（支援記録・予定） ===');
+run(`(function(){
+  appendRow(SHEETS.USER,{user_code:'TEST01',拠点:'清水',自動ログ対応:false,服薬自動:true,在否自動:false,日中自動:false,有効:true});
+  ['CHK101','CHK106','CHK201'].forEach(function(id){var c=checkById_(id);updateRow(SHEETS.CHECK,c._row,{'有効':true});});
+  checkById_._map=null;
+  appendRow(SHEETS.LOG_IMPORT,{log_id:'RAW1',発生日:addDays_(todayStr_(),-1),対象種別:'raw_switchbot',対象:'TEST01',項目名:'服薬',値:'OK',取込元:'switchbot',取込日時:nowStr_()});
+})()`);
+const autoRes = run(`runAutoFill(addDays_(todayStr_(),-1))`);
+check('SwitchBotログで服薬確認が自動充足', autoRes.filled === 1, autoRes);
+const d2 = run(`detectGaps(addDays_(todayStr_(),-1),['R02'])`);
+check('自動充足済みの服薬は不足にならない', !d2.some(g => g.check_id === 'CHK106'), d2);
+check('在否確認は不足として残る', d2.some(g => g.check_id === 'CHK101'), d2);
+pushes.length = 0;
+console.log('  morningBatch（支援記録あり） → ' + run('morningBatch()'));
+check('Stage1は藤原・服部の2名にまとめて送信', pushes.length === 2 && pushes.map(p => p.to).sort().join() === 'U_FUJI,U_HATT', pushes.map(p => p.to));
+check('在否確認の不足がS5に登録', rows('GAP').some(g => g.check_id === 'CHK101' && g.対象 === 'TEST01'));
+check('自動充足済みの服薬はS5に登録されない', !rows('GAP').some(g => g.check_id === 'CHK106'));
+pushes.length = 0;
+console.log('  nightBatch → ' + run('nightBatch()'));
+check('夜勤不在時は社員へ送信', pushes.length >= 1, pushes.length);
+check('夜の確認セットの見出し', JSON.stringify(pushes[0]).indexOf('夜の確認セット') > 0);
+check('夜はシフト希望を混ぜない', JSON.stringify(pushes).indexOf('シフト希望') < 0);
+
+console.log('\n=== T7b まとめ回答：1人が答えたら他方には送らない ===');
+const setTasks = rows('TASK').filter(t => t.セットid && t.送信先staff_id === 'STF001' && t.送信状態 === '送信済');
+const nightTask = setTasks[setTasks.length - 1];
+replies.length = 0;
+post([{ type: 'postback', webhookEventId: 'e20', source: { userId: 'U_FUJI' }, postback: { data: 'ans|' + nightTask.task_id + '|在宅' }, replyToken: 'r20' }]);
+const twin = rows('TASK').filter(t => t.gap_id === nightTask.gap_id && t.task_id !== nightTask.task_id);
+check('未送信の同一項目は中止される', twin.every(t => t.送信状態 !== '待機'), twin.map(t => t.送信状態));
+check('回答で次の質問が返る', JSON.stringify(replies[0]).indexOf('記録に反映しました') > 0, replies[0]);
+const fillsBefore = rows('FILL').length;
+const sentTwin = twin.find(t => t.送信状態 === '送信済' && !String(t.回答 || ''));
+if (sentTwin) {
+  replies.length = 0;
+  post([{ type: 'postback', webhookEventId: 'e21', source: { userId: 'U_HATT' }, postback: { data: 'ans|' + sentTwin.task_id + '|在宅' }, replyToken: 'r21' }]);
+  check('送信済みの重複質問に答えても二重記録しない', rows('FILL').length === fillsBefore, [fillsBefore, rows('FILL').length]);
+  check('他の人が回答済みと案内する', JSON.stringify(replies).indexOf('他の方が回答済み') > 0, replies[0]);
+}
+
+console.log('\n=== T7c 深夜帯のキュー保存と朝の送信 ===');
+const setQuiet = (s, e) => run(`(function(){
+  var a=findRow(SHEETS.SETTING,{'キー':'quiet_start_hour'});updateRow(SHEETS.SETTING,a._row,{'値':${s}});
+  var b=findRow(SHEETS.SETTING,{'キー':'quiet_end_hour'});updateRow(SHEETS.SETTING,b._row,{'値':${e}});clearSettingCache();})()`);
+setQuiet(0, 23);   // いまを深夜帯扱いにする
+check('深夜帯と判定される', run('isQuietHours_()') === true);
+pushes.length = 0;
+run(`(function(){
+  var c=checkById_('CHK111');updateRow(SHEETS.CHECK,c._row,{'有効':true});checkById_._map=null;})()`);
+run('morningBatch()');
+check('深夜帯は送信せずキューに積む', pushes.length === 0 && rows('TASK').some(t => t.送信状態 === 'キュー'),
+  rows('TASK').filter(t => t.送信状態 === 'キュー').length);
+setQuiet(22, 7);
+const flushed = run('flushQueue()');
+check('朝になったらキューを送信', flushed >= 1 && pushes.length >= 1, [flushed, pushes.length]);
+check('キューが残らない', !rows('TASK').some(t => t.送信状態 === 'キュー'));
+
+console.log('\n=== T8 バックアップ ===');
+console.log('  dailyBackup → ' + run('dailyBackup()'));
+check('S10にバックアップ完了が残る', rows('RUN_LOG').some(r => String(r.詳細).indexOf('バックアップ完了') >= 0));
+
+console.log('\n=== T9 手動コマンド ===');
+replies.length = 0;
+post([{ type: 'message', webhookEventId: 'e8', source: { userId: 'U_FUJI' }, message: { type: 'text', text: '状況' }, replyToken: 'r8' }]);
+check('「状況」に未完了一覧を返す', JSON.stringify(replies[0]).indexOf('現在の状況') > 0, replies[0]);
+replies.length = 0;
+post([{ type: 'message', webhookEventId: 'e9', source: { userId: 'U_FUJI' }, message: { type: 'text', text: 'ヘルプ' }, replyToken: 'r9' }]);
+check('「ヘルプ」に使い方を返す', JSON.stringify(replies[0]).indexOf('AI Uriboの使い方') > 0);
+replies.length = 0; pushes.length = 0;
+post([{ type: 'message', webhookEventId: 'e10', source: { userId: 'U_FUJI' }, message: { type: 'text', text: '報告' }, replyToken: 'r10' }]);
+post([{ type: 'message', webhookEventId: 'e11', source: { userId: 'U_FUJI' }, message: { type: 'text', text: '転倒がありましたが怪我はなし' }, replyToken: 'r11' }]);
+check('報告がS4に記録される', rows('LOG_IMPORT').some(l => l.対象種別 === 'report'));
+check('報告が社員へ共有される', pushes.some(p => JSON.stringify(p).indexOf('転倒がありました') > 0));
+replies.length = 0;
+post([{ type: 'message', webhookEventId: 'e12', source: { userId: 'U_FUJI' }, message: { type: 'text', text: 'おはよう' }, replyToken: 'r12' }]);
+check('雑談にはボタン案内を返す', JSON.stringify(replies[0]).indexOf('ボタンでお答えください') > 0);
+
+console.log('\n=== 追加検証 ===');
+replies.length = 0;
+post([{ type: 'postback', webhookEventId: 'e13', source: { userId: 'U_FUJI' }, postback: { data: 'ans|' + task1.task_id + '|今答える' }, replyToken: 'r13' }]);
+check('回答済みタスクの再回答を弾く', JSON.stringify(replies[0]).indexOf('すでに回答済み') > 0, replies[0]);
+replies.length = 0;
+post([{ type: 'message', webhookEventId: 'e14', source: { userId: 'U_UNKNOWN' }, message: { type: 'text', text: 'こんにちは' }, replyToken: 'r14' }]);
+check('未登録ユーザーは操作を受け付けない', JSON.stringify(replies[0]).indexOf('管理者の登録をお待ちください') > 0);
+const before = replies.length;
+run(`doPost(${JSON.stringify({ parameter: { k: 'wrong' }, postData: { contents: JSON.stringify({ events: [{ type: 'message', webhookEventId: 'e15', source: { userId: 'U_FUJI' }, message: { type: 'text', text: '状況' }, replyToken: 'r15' }] }) } })})`);
+check('秘密キー不一致のリクエストを破棄', replies.length === before);
+post([{ type: 'message', webhookEventId: 'e8', source: { userId: 'U_FUJI' }, message: { type: 'text', text: '状況' }, replyToken: 'r16' }]);
+check('重複イベントIDを無視', replies.length === before);
+run('installTriggers()');
+check('トリガー5件を登録', sandbox.__triggers.length === 5, sandbox.__triggers);
+check('S10にエラーが1件も無い', !rows('RUN_LOG').some(r => r.結果 === 'エラー'),
+  rows('RUN_LOG').filter(r => r.結果 === 'エラー').map(r => r.処理名 + ': ' + r.詳細));
+
+console.log('\n================ 結果: ' + (failures ? failures + '件 NG' : 'すべてOK') + ' ================\n');
+process.exit(failures ? 1 : 0);

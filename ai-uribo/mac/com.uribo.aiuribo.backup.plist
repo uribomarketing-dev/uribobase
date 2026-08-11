@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  AI Uribo 第2バックアップ launchd設定
+  配置先: ~/Library/LaunchAgents/com.uribo.aiuribo.backup.plist
+
+  登録:   launchctl load ~/Library/LaunchAgents/com.uribo.aiuribo.backup.plist
+  解除:   launchctl unload ~/Library/LaunchAgents/com.uribo.aiuribo.backup.plist
+  即実行: launchctl start com.uribo.aiuribo.backup
+
+  ・RunAtLoad = true  … Macの起動（ログイン）時に1回実行
+  ・StartCalendarInterval … 毎週日曜4:00に実行
+  ※ ProgramArguments のパスは実際のユーザー名に合わせて書き換えること
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.uribo.aiuribo.backup</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/toshiki/bin/sync_to_nas.sh</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Weekday</key>
+        <integer>0</integer>
+        <key>Hour</key>
+        <integer>4</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/toshiki/Library/Logs/ai_uribo_backup.out.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/toshiki/Library/Logs/ai_uribo_backup.err.log</string>
+</dict>
+</plist>

@@ -1,0 +1,319 @@
+/**
+ * 確認セットの組み立てと回答処理（03_LINE会話仕様.md F2・F3 /【08】まとめ回答形式）
+ *
+ * 1通に質問を詰め込まず、「項目ごとにボタンをタップ → 次の質問が届く」連続フローにする。
+ * 1セット＝S6の複数行（同じセットid、並び順で順番管理）。
+ * 誰か1人が回答した不足は、他の人の待機タスクを自動で中止する。
+ */
+
+/**
+ * 確認セットを作成し、最初の質問を送る。
+ * @param {string} staffId 送信先staff_id
+ * @param {Array.<Object>} gaps S5の行オブジェクト（gap_id・対象日・check_id・対象を含む）
+ * @param {string} title セットの見出し（例：【昨日(8/11)の記録確認】）
+ * @return {{setId:string, count:number, sent:boolean}} 作成結果
+ */
+function createAndSendSet(staffId, gaps, title) {
+  var proc = 'createAndSendSet';
+  if (!gaps || !gaps.length) return { setId: '', count: 0, sent: false };
+
+  var setId = nextSeqId_(SHEETS.TASK, 'セットid', 'SET', 5);
+  gaps.forEach(function (g, i) {
+    appendRow(SHEETS.TASK, {
+      'task_id': nextSeqId_(SHEETS.TASK, 'task_id', 'TSK', 5),
+      'gap_id': g.gap_id,
+      '送信先staff_id': staffId,
+      '送信状態': SEND_STATUS.WAITING,
+      '再送回数': 0,
+      '追記待ち': false,
+      'セットid': setId,
+      '並び順': i + 1
+    });
+  });
+
+  var intro = msgText_(title + '\n全' + gaps.length + '件です。ボタンで順番にお答えください。');
+  var sent = sendNextInSet_(setId, null, [intro]);
+  logInfo(proc, staffId + ' へ ' + gaps.length + '件の確認セット（' + setId + '）を作成 / 送信=' + sent);
+  return { setId: setId, count: gaps.length, sent: sent };
+}
+
+/**
+ * セット内の次の未送信タスクを1件送る。
+ * @param {string} setId セットid
+ * @param {string} [replyToken] 返信トークン（webhookからの応答時に指定）
+ * @param {Array.<Object>} [prefixMessages] 質問の前に付けるメッセージ（お礼など）
+ * @return {boolean} 質問を送ったらtrue（残りが無ければfalse）
+ */
+function sendNextInSet_(setId, replyToken, prefixMessages) {
+  var proc = 'sendNextInSet_';
+  var tasks = findRows(SHEETS.TASK, function (r) {
+    return String(r['セットid']) === String(setId) && String(r['送信状態']) === SEND_STATUS.WAITING;
+  }).sort(function (a, b) { return Number(a['並び順']) - Number(b['並び順']); });
+
+  for (var i = 0; i < tasks.length; i++) {
+    var t = tasks[i];
+    var gap = findRow(SHEETS.GAP, { 'gap_id': t['gap_id'] });
+    if (!gap) { updateRow(SHEETS.TASK, t._row, { '送信状態': SEND_STATUS.CANCELED }); continue; }
+    if (String(gap['状態']) === GAP_STATUS.DONE) {
+      updateRow(SHEETS.TASK, t._row, { '送信状態': SEND_STATUS.CANCELED });
+      continue;
+    }
+    var check = checkById_(gap['check_id']);
+    if (!check) { updateRow(SHEETS.TASK, t._row, { '送信状態': SEND_STATUS.CANCELED }); continue; }
+
+    var remain = tasks.length - i - 1;
+    var messages = (prefixMessages || []).concat([buildQuestion_(t, gap, check, remain)]);
+
+    if (replyToken) {
+      var ok = replyRaw_(replyToken, messages);
+      updateRow(SHEETS.TASK, t._row, {
+        '送信本文': JSON.stringify(messages),
+        '送信状態': ok ? SEND_STATUS.SENT : SEND_STATUS.FAILED,
+        '送信日時': ok ? nowStr_() : ''
+      });
+      if (ok) updateRow(SHEETS.GAP, gap._row, { '状態': GAP_STATUS.ASKING });
+      return ok;
+    }
+
+    var res = sendToStaff(t['送信先staff_id'], messages, { taskRowNumber: t._row, label: proc });
+    if (res.ok && !res.queued) updateRow(SHEETS.GAP, gap._row, { '状態': GAP_STATUS.ASKING });
+    return res.ok;
+  }
+
+  // 残りが無い場合は何も送らない（呼び出し側が完了メッセージを返す）
+  return false;
+}
+
+/**
+ * 1件分の質問メッセージを作る。質問文・選択肢はS3チェック項目マスタの内容を使う。
+ * @param {Object} task S6の行
+ * @param {Object} gap S5の行
+ * @param {Object} check S3の行
+ * @param {number} remain このセットの残り件数
+ * @return {Object} LINEメッセージオブジェクト
+ */
+function buildQuestion_(task, gap, check, remain) {
+  var text = fillPlaceholders_(String(check['質問文']), gap);
+  var choices = String(check['選択肢'] || '').split('|').filter(function (s) { return s.trim(); });
+  if (!choices.length) choices = ['済', 'できていない', 'わからない'];
+
+  var actions = choices.map(function (c) {
+    return { label: c, data: 'ans|' + task['task_id'] + '|' + c };
+  });
+  var title = String(check['項目名']);
+  if (remain > 0) title += '（残り' + remain + '件）';
+  return msgButtons_(title, text, actions);
+}
+
+/**
+ * 質問文のプレースホルダを埋める。
+ * {対象}=利用者名またはスタッフ名 / {日付}=対象日 / {月}=対象月 / {締切日}=シフト締切日
+ * @param {string} template 質問文テンプレート
+ * @param {Object} gap S5の行
+ * @return {string} 置換後の文字列
+ */
+function fillPlaceholders_(template, gap) {
+  var date = toDateStr_(gap['対象日']);
+  var md = date ? (Number(date.substring(5, 7)) + '/' + Number(date.substring(8, 10))) : '';
+  var month = date ? (Number(date.substring(5, 7)) + '月') : '';
+  return String(template)
+    .replace(/\{対象\}/g, displayName_(String(gap['対象'])))
+    .replace(/\{日付\}/g, md)
+    .replace(/\{月\}/g, month)
+    .replace(/\{締切日\}/g, String(getSettingNum('shift_deadline_day', 25)));
+}
+
+/**
+ * コード（user_code / staff_id）を表示名に変換する。
+ * S9対応表 → S1スタッフマスタの順で探し、見つからなければコードのまま返す。
+ * @param {string} code コード
+ * @return {string} 表示名
+ */
+function displayName_(code) {
+  if (!displayName_._map) {
+    var m = {};
+    safely_('displayName_', function () {
+      findRows(SHEETS.STAFF).forEach(function (r) {
+        if (r['氏名']) m[String(r['staff_id'])] = String(r['氏名']);
+      });
+      findRows(SHEETS.NAME_MAP).forEach(function (r) {
+        if (r['氏名']) m[String(r['コード'])] = String(r['氏名']);
+      });
+    });
+    displayName_._map = m;
+  }
+  return displayName_._map[String(code)] || String(code);
+}
+
+/**
+ * ボタン回答（postback: ans|task_id|値）を処理する。
+ * @param {Object} staff 回答したスタッフのS1行
+ * @param {string} taskId task_id
+ * @param {string} answer 回答値
+ * @param {string} replyToken 返信トークン
+ * @return {void}
+ */
+function handleAnswer_(staff, taskId, answer, replyToken) {
+  var proc = 'handleAnswer_';
+  var task = findRow(SHEETS.TASK, { 'task_id': taskId });
+  if (!task) {
+    replyRaw_(replyToken, [msgText_('この確認は見つかりませんでした。お手数ですが「状況」と送って確認してください。')]);
+    return;
+  }
+  if (String(task['回答'] || '').trim()) {
+    replyRaw_(replyToken, [msgText_('この項目はすでに回答済みです。ありがとうございます。')]);
+    return;
+  }
+
+  var gap = findRow(SHEETS.GAP, { 'gap_id': task['gap_id'] });
+  var check = gap ? checkById_(gap['check_id']) : null;
+
+  // すでに送信済みの質問に他の人が先に答えていた場合（同じ不足を2名に送っているため起こりうる）
+  if (gap && String(gap['状態']) === GAP_STATUS.DONE) {
+    updateRow(SHEETS.TASK, task._row, {
+      '回答': answer + '（他の方が先に回答済み）',
+      '回答日時': nowStr_(),
+      '回答方法': 'ボタン'
+    });
+    var done = msgText_('この項目は他の方が回答済みでした。ありがとうございます。');
+    if (!sendNextInSet_(task['セットid'], replyToken, [done])) replyRaw_(replyToken, [done]);
+    logInfo(proc, taskId + ' は他の人が回答済みのため二重記録しない');
+    return;
+  }
+
+  updateRow(SHEETS.TASK, task._row, {
+    '回答': answer,
+    '回答日時': nowStr_(),
+    '回答方法': 'ボタン'
+  });
+
+  var needNote = NEEDS_NOTE_ANSWERS.indexOf(answer) >= 0;
+  var unknown = UNKNOWN_ANSWERS.indexOf(answer) >= 0;
+  var later = (answer.indexOf('後で') === 0);
+
+  if (gap) {
+    if (later) {
+      // 「後で」は不足のまま残し、翌日また確認する
+      updateRow(SHEETS.GAP, gap._row, { '状態': GAP_STATUS.DETECTED });
+    } else if (unknown) {
+      // 「わからない」は不足解消とみなさず滞留させる（04共通ルール）
+      updateRow(SHEETS.GAP, gap._row, { '状態': GAP_STATUS.ESCALATED });
+    } else if (needNote) {
+      // 一言待ち。追記を受け取った時点で記録として成立させる（handleNote_）
+      updateRow(SHEETS.GAP, gap._row, { '状態': GAP_STATUS.ANSWERED });
+    } else {
+      updateRow(SHEETS.GAP, gap._row, { '状態': GAP_STATUS.ANSWERED });
+      recordFill_(gap, check, answer, staff);
+      updateRow(SHEETS.GAP, gap._row, { '状態': GAP_STATUS.DONE, '完了日時': nowStr_() });
+      cancelSiblingTasks_(gap['gap_id'], task['task_id']);
+    }
+  }
+  logInfo(proc, staff['氏名'] + ' が ' + taskId + ' に「' + answer + '」と回答');
+
+  if (needNote || unknown) {
+    updateRow(SHEETS.TASK, task._row, { '追記待ち': true });
+    replyRaw_(replyToken, [msgText_(NOTE_PROMPTS[answer] || NOTE_PROMPT_DEFAULT)]);
+    return;
+  }
+
+  var thanks = msgText_('ありがとうございます。記録に反映しました。');
+  var sent = sendNextInSet_(task['セットid'], replyToken, [thanks]);
+  if (!sent) {
+    replyRaw_(replyToken, [msgText_('ありがとうございます。記録に反映しました。\nこれで全部完了です。おつかれさまでした。')]);
+  }
+}
+
+/**
+ * 自由記述（追記）を処理する。追記待ちのタスクがあれば回答に追記する。
+ * @param {Object} staff スタッフのS1行
+ * @param {string} text 受信テキスト
+ * @param {string} replyToken 返信トークン
+ * @return {boolean} 追記として処理したらtrue
+ */
+function handleNote_(staff, text, replyToken) {
+  var pending = findRows(SHEETS.TASK, function (r) {
+    return String(r['送信先staff_id']) === String(staff['staff_id']) && isTrue_(r['追記待ち']);
+  }).sort(function (a, b) {
+    return toDateTimeStr_(b['回答日時']).localeCompare(toDateTimeStr_(a['回答日時']));
+  });
+  if (!pending.length) return false;
+
+  var task = pending[0];
+  var base = String(task['回答'] || '');
+  var note = (String(text).trim() === 'なし') ? '' : String(text).trim();
+  var combined = base + (note ? '／' + note : '');
+  updateRow(SHEETS.TASK, task._row, {
+    '回答': combined,
+    '回答方法': '自由記述',
+    '追記待ち': false
+  });
+
+  var gap = findRow(SHEETS.GAP, { 'gap_id': task['gap_id'] });
+  var check = gap ? checkById_(gap['check_id']) : null;
+  if (gap && UNKNOWN_ANSWERS.indexOf(base) < 0 && String(gap['状態']) !== GAP_STATUS.DONE) {
+    // 「わからない」以外は、状況が書かれた時点で記録として成立させる
+    recordFill_(gap, check, combined, staff);
+    updateRow(SHEETS.GAP, gap._row, { '状態': GAP_STATUS.DONE, '完了日時': nowStr_() });
+    cancelSiblingTasks_(gap['gap_id'], task['task_id']);
+  }
+
+  var thanks = msgText_('ありがとうございます。記録に反映しました。');
+  var sent = sendNextInSet_(task['セットid'], replyToken, [thanks]);
+  if (!sent) replyRaw_(replyToken, [msgText_('ありがとうございます。記録に反映しました。\nこれで全部完了です。おつかれさまでした。')]);
+  return true;
+}
+
+/**
+ * 回答内容をS7補完台帳とS4実績ログに記録する。
+ * @param {Object} gap S5の行
+ * @param {Object} check S3の行
+ * @param {string} value 回答値
+ * @param {Object} staff 回答したスタッフのS1行
+ * @return {void}
+ */
+function recordFill_(gap, check, value, staff) {
+  var itemName = check ? String(check['項目名']) : String(gap['check_id']);
+  var kind = check ? String(check['対象種別']) : 'support';
+  var date = toDateStr_(gap['対象日']);
+
+  // シフト希望は対象月（YYYY-MM）を値に含める。R01がこの値を見て「回答済み」と判定するため。
+  if (kind === 'shift') value = date.substring(0, 7) + ' ' + value;
+
+  appendRow(SHEETS.FILL, {
+    'fill_id': nextSeqId_(SHEETS.FILL, 'fill_id', 'FIL', 6),
+    '対象日': date,
+    '対象': String(gap['対象']),
+    '項目名': itemName,
+    '値': value,
+    '記入者staff_id': String(staff['staff_id']),
+    '取込済フラグ': false,
+    '作成日時': nowStr_()
+  });
+
+  appendRow(SHEETS.LOG_IMPORT, {
+    'log_id': nextSeqId_(SHEETS.LOG_IMPORT, 'log_id', 'LOG', 6),
+    '発生日': date,
+    '対象種別': kind,
+    '対象': String(gap['対象']),
+    '項目名': itemName,
+    '値': value,
+    '取込元': 'ai-uribo',
+    '取込日時': nowStr_()
+  });
+}
+
+/**
+ * 同じ不足に対する他の人の待機タスクを中止する（重複質問の防止）。
+ * @param {string} gapId gap_id
+ * @param {string} exceptTaskId 除外するtask_id
+ * @return {void}
+ */
+function cancelSiblingTasks_(gapId, exceptTaskId) {
+  findRows(SHEETS.TASK, function (r) {
+    return String(r['gap_id']) === String(gapId)
+      && String(r['task_id']) !== String(exceptTaskId)
+      && (String(r['送信状態']) === SEND_STATUS.WAITING || String(r['送信状態']) === SEND_STATUS.QUEUED);
+  }).forEach(function (t) {
+    updateRow(SHEETS.TASK, t._row, { '送信状態': SEND_STATUS.CANCELED });
+  });
+}
