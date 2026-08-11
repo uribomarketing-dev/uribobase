@@ -41,6 +41,8 @@ ai-uribo/
 │   └── backup.gs                 第1バックアップ（Drive・毎日3:00）
 ├── tests/
 │   └── harness.js                GAS APIをモックしたローカル自動テスト（node harness.js で53項目を検証）
+├── tools/
+│   └── make_review_bundle.sh     別AIレビュー用に全ソースを1ファイルにまとめる（review_bundle.md を生成）
 ├── mac/                          第2バックアップ（Mac→清水NAS）
 │   ├── sync_to_nas.sh
 │   └── com.uribo.aiuribo.backup.plist
@@ -49,6 +51,7 @@ ai-uribo/
     ├── デプロイ手順.md            GASへの配置・LINE接続手順（Step3）
     ├── テスト手順書.md            Step6のテストシナリオと結果記入欄
     ├── テスト結果報告.md          ローカル自動テストの結果と、直した不具合
+    ├── 別AIレビュー依頼文.md      ChatGPTに貼るレビュー依頼テンプレート（A:技術 / B:運用・監査）
     ├── 運用マニュアル.md          非エンジニア向け1枚マニュアル
     └── 自動ソース取込フォーマット.md  各アプリからのログ投入形式
 ```
