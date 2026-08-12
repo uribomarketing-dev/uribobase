@@ -58,6 +58,9 @@ ai-uribo/
 │   └── harness.js                GAS APIをモックしたローカル自動テスト（node harness.js で102項目を検証）
 ├── tools/
 │   └── make_review_bundle.sh     別AIレビュー用に全ソースを1ファイルにまとめる（review_bundle.md を生成）
+├── homeassistant/                玉里のAIハブ連携（Frigateの検知をAI Uriboへ自動送信）
+│   ├── ai_uribo.yaml             貼り付けるだけのHA設定（rest_command＋自動化3本）
+│   └── README.md                 導入手順と役割分担
 ├── mac/                          第2バックアップ（Mac→清水NAS）
 │   ├── sync_to_nas.sh
 │   └── com.uribo.aiuribo.backup.plist
