@@ -324,11 +324,19 @@ function scanAlerts_(targetDate) {
       if (cache.get(key)) return;
       cache.put(key, '1', 86400);
 
-      var msg = '【気になる記述】' + date + '　' + displayName_(String(r['対象'])) + '\n'
-        + '「' + hit.join('・') + '」という記述が見つかりました。\n\n'
+      // AIの読み取りは誤りが多い。断定せずに知らせ、事実かどうかを人に判定してもらう
+      var msg = '【AIが気にした記述】' + date + '　' + displayName_(String(r['対象'])) + '\n'
+        + '「' + hit.join('・') + '」という語が見つかりました。\n\n'
         + excerptAround_(text, hit[0], 60) + '\n\n'
-        + '※AIまとめの文章からの自動検出です。事実かどうかのご確認をお願いします。';
-      sent += sendToEscalationStaff([msgText_(msg)], proc);
+        + '※これはカメラのAIが書いた文章です。**誤りが多く含まれます。**\n'
+        + '　事実かどうかだけ、下のボタンで教えてください。';
+      var key2 = date + '|' + hit[0] + '|' + String(r['対象']);
+      var buttons = msgButtons_('AIの読み取り確認', '実際にあったことですか？', [
+        { label: '事実だった', data: 'alert|ok|' + key2 },
+        { label: 'これは違う（誤検知）', data: 'alert|ng|' + key2 },
+        { label: '判断できない', data: 'alert|unknown|' + key2 }
+      ]);
+      sent += sendToEscalationStaff([msgText_(msg), buttons], proc);
       logWarn(proc, date + ' に注意語を検出: ' + hit.join('・'));
     });
   });

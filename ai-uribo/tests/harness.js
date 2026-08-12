@@ -417,7 +417,19 @@ check('文章から食事提供を推定で埋める',
 check('文章から利用者の状況も拾う',
   rows('LOG_IMPORT').some(l => String(l.発生日) === '2026-08-07' && String(l.項目名) === '利用者の状況'));
 check('注意語（うつ伏せ・座り込）を社員へ通知',
-  pushes.some(p => JSON.stringify(p).indexOf('気になる記述') > 0), pushes.map(p => p.to));
+  pushes.some(p => JSON.stringify(p).indexOf('AIが気にした') > 0), pushes.map(p => p.to));
+// AIの文章は誤りが多い前提：断定せず、誤検知を人が返せるか
+const alertMsg = JSON.stringify(pushes.filter(p => JSON.stringify(p).indexOf('AIが気にした') > 0)[0] || '');
+check('断定せず「誤りが多い」と明示して知らせる', alertMsg.indexOf('誤りが多く含まれます') > 0, alertMsg.substring(0, 300));
+check('誤検知を返すボタンが付く', alertMsg.indexOf('これは違う（誤検知）') > 0);
+replies.length = 0;
+post([{ type: 'postback', webhookEventId: 'e52', source: { userId: 'U_FUJI' },
+  postback: { data: 'alert|ng|2026-08-07|うつ伏せ|ALL' }, replyToken: 'r52' }]);
+check('誤検知の判定がS10に残る',
+  rows('RUN_LOG').some(r => String(r.処理名) === 'alertFeedback' && String(r.詳細).indexOf('誤検知') > 0));
+check('誤検知のときは語の外し方を案内する',
+  JSON.stringify(replies[0] || '').indexOf('alert_keywords') > 0, replies[0]);
+
 check('全文ではなく該当箇所だけを記録に残す',
   rows('LOG_IMPORT').filter(l => String(l.項目名) === '食事提供' && String(l.発生日) === '2026-08-07')
     .every(l => String(l.値).length < summaryText.length));

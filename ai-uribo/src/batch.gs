@@ -140,6 +140,13 @@ function weeklyDigest() {
     var autoFilled = safely_(proc, function () { return countAutoFilled_(from, to); }, 0);
     var needsReview = safely_(proc, function () { return countNeedsReview_(from, to); }, 0);
 
+    // AIの読み取り通知の精度（誤検知がどれだけ多いか）
+    var feedback = findRows(SHEETS.RUN_LOG, function (r) {
+      var d = toDateTimeStr_(r['日時']).substring(0, 10);
+      return String(r['処理名']) === 'alertFeedback' && d >= from && d <= to;
+    });
+    var wrong = feedback.filter(function (r) { return String(r['詳細']).indexOf('誤検知') >= 0; }).length;
+
     var askCount = findRows(SHEETS.TASK, function (r) {
       var d = toDateTimeStr_(r['送信日時']);
       return d && d.substring(0, 10) >= from && d.substring(0, 10) <= to;
@@ -156,6 +163,10 @@ function weeklyDigest() {
     if (needsReview) {
       lines.push('うち推定で埋めた「要精査」：' + needsReview + '件'
         + '（LINEで「精査」と送るか、S7補完台帳の要精査列をご確認ください）');
+    }
+    if (feedback.length) {
+      lines.push('AIの読み取り通知：' + feedback.length + '件（うち誤検知 ' + wrong + '件・'
+        + Math.round(wrong * 100 / feedback.length) + '%）');
     }
     if (stale.length) lines.push('※8時間以上返事待ちの項目：' + stale.length + '件');
     lines.push('');

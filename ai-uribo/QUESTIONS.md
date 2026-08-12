@@ -57,6 +57,21 @@ Q1〜Q4は本番投入前にご確認ください。
   **AIハブのOpenClawがVLMで映像を"言葉"にできる**ため、そこ経由なら記録に落とせます。
   受け口（POST取り込み）は実装済み。詳細は `docs/SwitchBot取得可能データ一覧.md`
 
+## Q7. 既存Netlifyアプリの LINE ログインが 400 になる件（AI Uriboとは別件）
+
+`melodious-puppy-b420fc.netlify.app` で
+**「400 Bad Request / This channel is now developing status. User need to have developer role.」**
+が出ています。これはアプリの不具合ではなく、**LINEチャネルの公開設定**です。
+
+- LINE Developers → 該当の **LINEログインチャネル** → 「チャネル基本設定」
+- **ステータスが「開発中（Developing）」**になっています。この状態では、
+  そのチャネルの**開発者・テスターに登録された人しかログインできません**
+- 直し方は2つ
+  1. **公開する**：チャネルのステータスを「公開済み（Published）」に切り替える（全員ログイン可）
+  2. **テスターに追加する**：試すだけなら、その人を開発者/テスターとして権限追加
+- なお、このアプリが表示しているID（`U…`）は**LINEのユーザーID**で、
+  AI UriboがS1に持つ `line_user_id` と**同じ値**です。将来1つの登録で両方に通せます
+
 ## Q5. 運用・監査観点レビューの要判断3件 【Phase2開始前にご判断ください】
 
 詳細と根拠は `docs/運用監査レビュー.md`。ここでは結論だけ。

@@ -290,6 +290,10 @@ function onPostback_(userId, data, replyToken) {
         handleAnswer_(staff, parts[1], parts.slice(2).join('|'), replyToken);
         return;
       }
+      if (parts[0] === 'alert') {
+        handleAlertFeedback_(staff, parts[1], parts.slice(2).join('|'), replyToken);
+        return;
+      }
       logWarn(proc, '未対応のpostback: ' + data);
       replyRaw_(replyToken, [msgText_('うまく受け取れませんでした。もう一度ボタンを押してみてください。')]);
     } catch (e) {
@@ -300,6 +304,27 @@ function onPostback_(userId, data, replyToken) {
     // ロックを取れないまま処理を続けると二重記録の原因になるため、必ず中断して案内する
     replyRaw_(replyToken, [msgText_('ただいま処理が混み合っています。少し待ってからもう一度お試しください。')]);
   });
+}
+
+/**
+ * AIの読み取り通知に対する判定（事実／誤検知／判断できない）を記録する。
+ * カメラのAIが書く文章は誤りが多いため、人の判定を貯めて精度を測り、
+ * 検出キーワードの調整に使う。
+ * @param {Object} staff 判定したスタッフのS1行
+ * @param {string} judge ok / ng / unknown
+ * @param {string} key 対象日|該当語|対象
+ * @param {string} replyToken 返信トークン
+ * @return {void}
+ */
+function handleAlertFeedback_(staff, judge, key, replyToken) {
+  var label = { ok: '事実だった', ng: '誤検知', unknown: '判断できない' }[judge] || judge;
+  writeLog('alertFeedback', 'AI判定', JSON.stringify({
+    判定: label, キー: key, 判定者: String(staff['staff_id'])
+  }));
+  var msg = (judge === 'ng')
+    ? 'ありがとうございます。誤検知として記録しました。\n同じような誤りが続く場合は、S8設定の alert_keywords から語を外せます。'
+    : 'ありがとうございます。記録しました。';
+  replyRaw_(replyToken, [msgText_(msg)]);
 }
 
 /**
