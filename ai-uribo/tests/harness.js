@@ -153,7 +153,7 @@ const sandbox = {
     },
     newTrigger: (fn) => {
       const b = {
-        timeBased: () => b, atHour: () => b, everyDays: () => b, onWeekDay: () => b,
+        timeBased: () => b, atHour: () => b, everyDays: () => b, onWeekDay: () => b, onMonthDay: () => b,
         inTimezone: () => b, create: () => { sandbox.__triggers.push(fn); }
       };
       return b;
@@ -195,7 +195,7 @@ function mockFolder(name) {
 function iter(arr) { let i = 0; return { hasNext: () => i < arr.length, next: () => arr[i++] }; }
 
 vm.createContext(sandbox);
-['config', 'db', 'log', 'notify', 'setup', 'learn', 'autofill', 'detect', 'ask', 'batch', 'webhook', 'backup', 'diagnose', 'switchbot', 'selfcheck', 'users', 'consistency', 'api'].forEach(f => {
+['config', 'db', 'log', 'notify', 'setup', 'learn', 'autofill', 'detect', 'ask', 'batch', 'webhook', 'backup', 'diagnose', 'switchbot', 'selfcheck', 'users', 'consistency', 'api', 'monthly'].forEach(f => {
   vm.runInContext(fs.readFileSync(path.join(SRC, f + '.gs'), 'utf8'), sandbox, { filename: f + '.gs' });
 });
 
@@ -804,6 +804,61 @@ replies.length = 0;
 post([{ type: 'message', webhookEventId: 'e35', source: { userId: 'U_NIGHT' }, message: { type: 'text', text: '診断' }, replyToken: 'r35' }]);
 check('夜勤は診断コマンドを使えない', JSON.stringify(replies[0] || '').indexOf('社員のみ') > 0, replies[0]);
 
+console.log('\n=== T15 月次まとめ（監査用） ===');
+run(`(function(){
+  // 先月の記録を用意する：1日は在宅で記録あり、2日は記録なし、3日は外泊（対象外）
+  var m = previousMonth_();
+  ['01','02','03'].forEach(function(d){
+    var day = m + '-' + d;
+    if (d === '01') {
+      appendRow(SHEETS.LOG_IMPORT,{log_id:nextSeqId_(SHEETS.LOG_IMPORT,'log_id','LOG',6),発生日:day,
+        対象種別:'support',対象:'U001',項目名:'在否確認',値:'在宅',取込元:'ai-uribo',
+        取込日時:nowStr_(),確度:'確定',推定回答:''});
+      appendRow(SHEETS.LOG_IMPORT,{log_id:nextSeqId_(SHEETS.LOG_IMPORT,'log_id','LOG',6),発生日:day,
+        対象種別:'support',対象:'U001',項目名:'食事提供',値:'朝夕とも提供',取込元:'test',
+        取込日時:nowStr_(),確度:'推定',推定回答:'朝夕とも提供'});
+    }
+    if (d === '03') {
+      appendRow(SHEETS.LOG_IMPORT,{log_id:nextSeqId_(SHEETS.LOG_IMPORT,'log_id','LOG',6),発生日:day,
+        対象種別:'support',対象:'U001',項目名:'在否確認',値:'外泊・帰省',取込元:'ai-uribo',
+        取込日時:nowStr_(),確度:'確定',推定回答:''});
+    }
+  });
+  var u=findRow(SHEETS.USER,{'user_code':'U001'});updateRow(SHEETS.USER,u._row,{'有効':true});
+  findRows(SHEETS.USER,function(r){return r['user_code']!=='U001';})
+    .forEach(function(r){updateRow(SHEETS.USER,r._row,{'有効':false});});
+  ['CHK101','CHK105'].forEach(function(id){var c=checkById_(id);updateRow(SHEETS.CHECK,c._row,{'有効':true});});
+  checkById_._map=null;
+})()`);
+pushes.length = 0;
+const monthLabel = run('previousMonth_()');
+console.log('  monthlyReport → ' + run('monthlyReport()'));
+check('月次まとめのシートができる',
+  book.sheets.some(sh => sh.name === '月次_' + monthLabel), book.sheets.map(s => s.name).slice(-3));
+const mrows = run(`findRows('月次_${monthLabel}')`);
+check('利用者×項目ごとに充足率が出る',
+  mrows.some(r => r.user_code === 'U001' && r.項目 === '在否確認'), mrows);
+const zaihi = mrows.find(r => r.user_code === 'U001' && r.項目 === '在否確認');
+check('外泊の日は対象日数から外れる',
+  Number(zaihi.対象日数) === run(`monthDays_('${monthLabel}')`).length - 1,
+  zaihi.対象日数 + ' / ' + run(`monthDays_('${monthLabel}')`).length);
+check('記録があった日数を数える', Number(zaihi.記録あり) === 1, zaihi);
+const shokuji = mrows.find(r => r.user_code === 'U001' && r.項目 === '食事提供');
+check('まだ確かめていない推定は「うち推定」で分けて数える',
+  Number(shokuji.記録あり) === 1 && Number(shokuji.うち推定) === 1, shokuji);
+check('未記録の日が分かる（監査で聞かれるのはここ）',
+  String(zaihi.未記録日).indexOf('02') >= 0, zaihi.未記録日);
+check('シートに氏名は出さない',
+  JSON.stringify(mrows).indexOf('山田テスト') < 0);
+check('要点は社員へLINEで届く',
+  JSON.stringify(pushes).indexOf('月次まとめ') > 0
+    && JSON.stringify(pushes).indexOf('充足率') > 0, JSON.stringify(pushes).substring(0, 200));
+check('LINEの文面では氏名に置き換える（誰の記録が足りないか分かるように）',
+  JSON.stringify(pushes).indexOf('山田テスト') > 0);
+const before15 = book.sheets.length;
+run('monthlyReport()');
+check('作り直しても同じシートを上書きする', book.sheets.length === before15);
+
 console.log('\n=== T14 既存アプリへの受け渡し口（API） ===');
 const apiGet = (params) => JSON.parse(run(`doGet(${JSON.stringify({ parameter: params })})`).text);
 check('秘密キーが違えば何も返さない',
@@ -968,9 +1023,10 @@ check('自動整理はバックアップの後に走る',
   String(run('dailyBackup()')).indexOf('のバックアップ完了') > 0);
 
 run('installTriggers()');
-check('トリガーを登録（SwitchBot設定時は7本）',
-  sandbox.__triggers.length === 7 && sandbox.__triggers.indexOf('switchbotPoll') >= 0
-    && sandbox.__triggers.indexOf('selfCheck') >= 0, sandbox.__triggers);
+check('トリガーを登録（SwitchBot設定時は8本）',
+  sandbox.__triggers.length === 8 && sandbox.__triggers.indexOf('switchbotPoll') >= 0
+    && sandbox.__triggers.indexOf('selfCheck') >= 0
+    && sandbox.__triggers.indexOf('monthlyReport') >= 0, sandbox.__triggers);
 // 「WEBHOOK_SECRET未設定なので拒否した」は、fail-closeの検証で意図的に出したエラー
 const unexpectedErrors = rows('RUN_LOG').filter(r => r.結果 === 'エラー' &&
   String(r.詳細).indexOf('WEBHOOK_SECRET が未設定') < 0);

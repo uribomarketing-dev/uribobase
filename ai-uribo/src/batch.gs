@@ -348,7 +348,7 @@ function formatMd_(dateStr) {
 function installTriggers() {
   var proc = 'installTriggers';
   var handlers = ['morningBatch', 'nightBatch', 'weeklyDigest', 'dailyBackup', 'flushQueue',
-                  'switchbotPoll', 'selfCheck'];
+                  'switchbotPoll', 'selfCheck', 'monthlyReport'];
   ScriptApp.getProjectTriggers().forEach(function (t) {
     if (handlers.indexOf(t.getHandlerFunction()) >= 0) ScriptApp.deleteTrigger(t);
   });
@@ -371,12 +371,16 @@ function installTriggers() {
     ScriptApp.newTrigger('switchbotPoll').timeBased()
       .atHour(getSettingNum('switchbot_poll_hour', 9)).everyDays(1).inTimezone(TZ).create();
   }
+  // 月次まとめは月初に前月分をまとめる（実地指導・監査の備え）
+  ScriptApp.newTrigger('monthlyReport').timeBased()
+    .onMonthDay(1).atHour(getSettingNum('monthly_report_hour', 11)).inTimezone(TZ).create();
   ScriptApp.newTrigger('weeklyDigest').timeBased()
     .onWeekDay(dayOfWeek_(getSettingNum('weekly_digest_dow', 0)))
     .atHour(digestHour).inTimezone(TZ).create();
 
   var summary = '自己点検' + getSettingNum('selfcheck_hour', 8) + '時 / 朝' + morning + '時 / 夜' + night
-    + '時 / 週次(日)' + digestHour + '時 / バックアップ' + backup + '時 / キュー送信' + quietEnd + '時';
+    + '時 / 週次(日)' + digestHour + '時 / 月次(1日)' + getSettingNum('monthly_report_hour', 11) + '時'
+    + ' / バックアップ' + backup + '時 / キュー送信' + quietEnd + '時';
   logInfo(proc, summary);
   return summary;
 }

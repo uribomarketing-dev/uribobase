@@ -156,7 +156,8 @@ var DEFAULT_SETTINGS = [
   ['archive_enabled', 'TRUE', '古い行を「_保管」シートへ自動で移すか（台帳が重くなるのを防ぐ。消しはしない）'],
   ['archive_after_days', '180', '実績ログ・完了した不足・回答済みの確認を、何日過ぎたら保管へ移すか'],
   ['log_keep_days', '90', '実行ログを何日分手元に残すか'],
-  ['sheet_warn_rows', '20000', 'この行数を超えたら自己点検で知らせる']
+  ['sheet_warn_rows', '20000', 'この行数を超えたら自己点検で知らせる'],
+  ['monthly_report_hour', '11', '月次まとめ（毎月1日・前月分）の実行時刻']
 ];
 
 /** 学習の段階 @type {Object.<string,string>} */
