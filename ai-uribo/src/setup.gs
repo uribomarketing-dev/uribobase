@@ -201,6 +201,7 @@ function onOpen() {
     .addItem('台帳を初期化する（initSheets）', 'initSheets')
     .addItem('セットアップ点検', 'menuCheckSetup_')
     .addItem('登録コードを発行', 'menuIssueCode_')
+    .addItem('診断情報をコピー', 'menuDiagnostics_')
     .addSeparator()
     .addItem('朝バッチを今すぐ実行', 'morningBatch')
     .addItem('夜の確認セットを今すぐ実行', 'nightBatch')

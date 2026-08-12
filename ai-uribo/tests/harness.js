@@ -179,7 +179,7 @@ function mockFolder(name) {
 function iter(arr) { let i = 0; return { hasNext: () => i < arr.length, next: () => arr[i++] }; }
 
 vm.createContext(sandbox);
-['config', 'db', 'log', 'notify', 'setup', 'autofill', 'detect', 'ask', 'batch', 'webhook', 'backup'].forEach(f => {
+['config', 'db', 'log', 'notify', 'setup', 'autofill', 'detect', 'ask', 'batch', 'webhook', 'backup', 'diagnose'].forEach(f => {
   vm.runInContext(fs.readFileSync(path.join(SRC, f + '.gs'), 'utf8'), sandbox, { filename: f + '.gs' });
 });
 
@@ -436,6 +436,16 @@ run(`(function(){
 replies.length = 0;
 post([{ type: 'message', webhookEventId: 'e33', source: { userId: 'U_NIGHT' }, message: { type: 'text', text: '状況' }, replyToken: 'r33' }]);
 check('夜勤には自分の担当分だけ表示', JSON.stringify(replies[0] || '').indexOf('あなたの未完了：0件') > 0, replies[0]);
+
+// 8. 診断コマンド（不具合報告用）
+replies.length = 0;
+post([{ type: 'message', webhookEventId: 'e34', source: { userId: 'U_FUJI' }, message: { type: 'text', text: '診断' }, replyToken: 'r34' }]);
+const diagText = JSON.stringify(replies[0] || '');
+check('「診断」で調査用情報を返す', diagText.indexOf('診断情報') > 0 && diagText.indexOf('件数') > 0, replies[0]);
+check('診断に個人情報を含めない', diagText.indexOf('U_FUJI') < 0 && diagText.indexOf('藤原') < 0);
+replies.length = 0;
+post([{ type: 'message', webhookEventId: 'e35', source: { userId: 'U_NIGHT' }, message: { type: 'text', text: '診断' }, replyToken: 'r35' }]);
+check('夜勤は診断コマンドを使えない', JSON.stringify(replies[0] || '').indexOf('社員のみ') > 0, replies[0]);
 
 run('installTriggers()');
 check('トリガー5件を登録', sandbox.__triggers.length === 5, sandbox.__triggers);

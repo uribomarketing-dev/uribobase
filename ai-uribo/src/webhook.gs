@@ -318,12 +318,19 @@ function onTextBody_(staff, userId, text, replyToken, proc) {
     switch (text) {
       case '状況': replyRaw_(replyToken, [msgText_(buildStatusText_(staff))]); return;
       case 'ヘルプ': replyRaw_(replyToken, [msgText_(HELP_TEXT_)]); return;
+      case '診断':
+        if (!isOfficeStaff_(staff)) {
+          replyRaw_(replyToken, [msgText_('このコマンドは社員のみ実行できます。')]);
+          return;
+        }
+        replyRaw_(replyToken, [msgText_(exportDiagnostics(true))]);
+        return;
       case '報告':
         cache.put('report_' + userId, '1', 600);
         replyRaw_(replyToken, [msgText_('報告の内容を送ってください（日時・何があったか・どう対応したか）。\n社員にもそのまま共有します。')]);
         return;
       case 'テスト実行':
-        if (String(staff['役割']) === '夜勤' || String(staff['役割']) === '世話人') {
+        if (!isOfficeStaff_(staff)) {
           replyRaw_(replyToken, [msgText_('このコマンドは社員のみ実行できます。')]);
           return;
         }
@@ -341,6 +348,16 @@ function onTextBody_(staff, userId, text, replyToken, proc) {
   }
 }
 
+/**
+ * 社員・管理者かどうか（管理コマンドを実行できる役割か）。
+ * @param {Object} staff S1の行
+ * @return {boolean} 社員・管理者ならtrue
+ */
+function isOfficeStaff_(staff) {
+  var role = String(staff['役割']);
+  return role === '社員' || role === '管理者';
+}
+
 /** ヘルプ本文 @type {string} */
 var HELP_TEXT_ = 'AI Uriboの使い方\n'
   + '・届いた質問はボタンを押すだけでOKです\n'
@@ -348,6 +365,7 @@ var HELP_TEXT_ = 'AI Uriboの使い方\n'
   + '・「状況」…今の未完了件数を確認できます\n'
   + '・「報告」…事故・体調急変などをその場で報告できます\n'
   + '・「ヘルプ」…このメッセージ\n'
+  + '・「診断」…（社員のみ）不具合調査用の情報を返します\n'
   + '答えられないときは無理をせず「わからない」で大丈夫です。社員が引き取ります。';
 
 /**
