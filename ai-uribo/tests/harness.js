@@ -372,6 +372,30 @@ if (userTask) {
 }
 run(`(function(){var c=checkById_('CHK100');updateRow(SHEETS.CHECK,c._row,{'有効':false});})()`);
 
+console.log('\n=== T7e AIハブ（OpenClaw）からの観察の取り込み ===');
+const yesterday = run('addDays_(todayStr_(),-1)');
+run(`(function(){var c=checkById_('CHK105');updateRow(SHEETS.CHECK,c._row,{'有効':true});})()`);
+const obsRes = run(`doPost(${JSON.stringify({
+  parameter: { k: 'k123' },
+  postData: { contents: JSON.stringify({
+    source: 'openclaw',
+    observations: [{ date: '__DATE__', target: 'ALL', item: '食事提供', value: '夕食を配膳している様子（キッチンカメラ 18:05）' }]
+  }) }
+})})`.replace('__DATE__', yesterday));
+check('観察の取り込みAPIが件数を返す', String(obsRes.text) === 'OK:1', obsRes);
+check('S4に raw_openclaw として入る',
+  rows('LOG_IMPORT').some(l => String(l.対象種別) === 'raw_openclaw' && String(l.項目名) === '食事提供'));
+const obsFill = run(`runAutoFill('${yesterday}')`);
+check('映像の観察が食事提供の推定として埋まる',
+  rows('LOG_IMPORT').some(l => String(l.対象種別) === 'support' && String(l.項目名) === '食事提供'
+    && String(l.値).indexOf('AIハブ映像解析') > 0), obsFill);
+check('AIハブ由来も要精査が付く',
+  rows('FILL').some(f => String(f.項目名) === '食事提供' && isTrueLike(f.要精査)));
+check('映像そのものは受け取らない（値は文字だけ）',
+  !rows('LOG_IMPORT').some(l => String(l.値).indexOf('data:image') >= 0
+    || String(l.値).indexOf('http') === 0));
+run(`(function(){var c=checkById_('CHK105');updateRow(SHEETS.CHECK,c._row,{'有効':false});})()`);
+
 console.log('\n=== T7c 深夜帯のキュー保存と朝の送信 ===');
 const setQuiet = (s, e) => run(`(function(){
   var a=findRow(SHEETS.SETTING,{'キー':'quiet_start_hour'});updateRow(SHEETS.SETTING,a._row,{'値':${s}});

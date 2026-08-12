@@ -90,6 +90,24 @@ var AUTOFILL_SOURCES = [
     }
   },
   {
+    id: 'openclaw_vision',
+    生ログ種別: 'raw_openclaw',
+    必要フラグ: '',
+    説明: 'AIハブ（OpenClaw）の映像解析メモ → 該当項目を推定で埋める',
+    map: function (raw) {
+      // AIハブのVLMが映像から読み取った内容が、すでにAI Uriboの項目名で届く前提。
+      // 映像そのものは受け取らない（台帳に入るのは言葉だけ）。
+      var name = String(raw['項目名'] || '').trim();
+      if (!name) return [];
+      return [{
+        項目名: name,
+        値: String(raw['値']) + '（AIハブ映像解析・要精査）',
+        推定: true,
+        全利用者: String(raw['対象'] || 'ALL') === 'ALL'
+      }];
+    }
+  },
+  {
     id: 'plan_carryover',
     生ログ種別: 'plan',           // 前夜に本人へ確認した「明日の予定」
     必要フラグ: '',

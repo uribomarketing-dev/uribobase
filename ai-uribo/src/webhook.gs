@@ -34,6 +34,13 @@ function doPost(e) {
       return ContentService.createTextOutput('NG');
     }
     var body = JSON.parse(e.postData.contents);
+
+    // LINE以外からの投入も同じ入口で受ける（送信元を本文の形で見分ける）
+    if (!body.events && (body.observations || body.source)) {
+      var n = ingestObservations_(body);
+      return ContentService.createTextOutput('OK:' + n);
+    }
+
     var events = body.events || [];
     events.forEach(function (ev) {
       safely_(proc, function () { handleEvent_(ev); });
@@ -42,6 +49,55 @@ function doPost(e) {
     logError(proc, err, e && e.postData ? String(e.postData.contents).substring(0, 500) : '');
   }
   return ContentService.createTextOutput('OK');
+}
+
+/**
+ * 外部からの観察データ（AIハブ／OpenClaw・他のアプリ）をS4に取り込む。
+ *
+ * 期待する本文（映像・画像は受け取らない。言葉だけ）：
+ *   {
+ *     "source": "openclaw",
+ *     "observations": [
+ *       { "date": "2026-08-11", "target": "SMZ01", "item": "食事提供", "value": "夕食を配膳（キッチンカメラ 18:05）" }
+ *     ]
+ *   }
+ * target を "ALL" にすると、その拠点の有効な利用者全員に展開される。
+ * 取り込んだ内容は翌朝の自動充足で「推定（要精査）」として記録に反映される。
+ * @param {Object} body リクエスト本文
+ * @return {number} 取り込んだ件数
+ */
+function ingestObservations_(body) {
+  var proc = 'ingestObservations_';
+  var source = String(body.source || 'external').substring(0, 40);
+  var list = body.observations || [];
+  if (!list.length && body.item) list = [body];   // 1件だけの簡易形式も受ける
+
+  return withLock_(proc, 60000, function () {
+    var n = 0;
+    list.forEach(function (o) {
+      safely_(proc, function () {
+        var item = String(o.item || o['項目名'] || '').trim();
+        var value = String(o.value || o['値'] || '').trim();
+        if (!item || !value) return;
+        appendRow(SHEETS.LOG_IMPORT, {
+          'log_id': nextSeqId_(SHEETS.LOG_IMPORT, 'log_id', 'LOG', 6),
+          '発生日': toDateStr_(o.date || o['発生日'] || todayStr_()),
+          '対象種別': 'raw_' + (source === 'openclaw' ? 'openclaw' : source),
+          '対象': String(o.target || o['対象'] || 'ALL'),
+          '項目名': item,
+          '値': truncate_(value, 300),
+          '取込元': source,
+          '取込日時': nowStr_()
+        });
+        n++;
+      });
+    });
+    logInfo(proc, source + ' から ' + n + '件を取り込みました');
+    return n;
+  }, function () {
+    logWarn(proc, 'ロックが取れなかったため取り込みを見送りました（送信側で再送してください）');
+    return 0;
+  });
 }
 
 /**
