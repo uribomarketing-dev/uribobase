@@ -1118,6 +1118,31 @@ check('自己点検が処理の遅れに気づいて知らせる',
 check('実行にかかった秒数が実行ログに残る（遅くなってきたら分かる）',
   String(run('morningBatch()')).indexOf('秒') > 0);
 
+console.log('\n=== T18 GAS貼り付け用の全部入りファイル ===');
+const bundler = require('../tools/bundle.js');
+check('全部入りファイルが最新（src/を直したら作り直されている）',
+  bundler.isBundleFresh(), 'node tools/bundle.js で作り直してください');
+const bundleText = bundler.buildBundle();
+let bundleOk = true;
+let bundleErr = '';
+try {
+  const box = vm.createContext({});
+  vm.runInContext(bundleText, box, { filename: 'AI_Uribo_全部入り.gs' });
+  ['doPost', 'doGet', 'morningBatch', 'nightBatch', 'weeklyDigest', 'monthlyReport',
+   'selfCheck', 'dailyBackup', 'flushQueue', 'installTriggers', 'quickStart',
+   'addUser', 'enablePhase2', 'importShiftText', 'onOpen'].forEach(fn => {
+    if (typeof box[fn] !== 'function') { bundleOk = false; bundleErr = fn + ' が定義されていません'; }
+  });
+} catch (e) {
+  bundleOk = false;
+  bundleErr = String(e);
+}
+check('貼り付けるだけで全機能が読み込める', bundleOk, bundleErr);
+check('src/の全ファイルが漏れなく入っている',
+  fs.readdirSync(SRC).filter(f => f.endsWith('.gs'))
+    .every(f => bundleText.indexOf('// ' + f + '\n') > 0),
+  fs.readdirSync(SRC).filter(f => f.endsWith('.gs') && bundleText.indexOf('// ' + f + '\n') < 0));
+
 run('installTriggers()');
 check('トリガーを登録（SwitchBot設定時は8本）',
   sandbox.__triggers.length === 8 && sandbox.__triggers.indexOf('switchbotPoll') >= 0
