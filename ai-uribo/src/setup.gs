@@ -1,7 +1,7 @@
 /**
  * 台帳初期化スクリプト（06 Step1）
  *
- * initSheets() を1回だけ実行すれば、02_データスキーマ.md のS1〜S11が
+ * initSheets() を1回だけ実行すれば、02_データスキーマ.md のS1〜S12が
  * ヘッダー付きで生成され、S1スタッフ4名・S3チェック項目・S8設定値が投入される。
  * 既存シートは上書きせずスキップし、実行ログ（S10）に記録する。
  */
@@ -169,6 +169,40 @@ function seedSettings_() {
 }
 
 /**
+ * はじめの設定をまとめて実行する（デプロイ直後にこれ1つ実行すればよい）。
+ * 台帳を作り、テストモードをONにし、足りない設定を一覧で返す。
+ * @return {string} 次にやることの案内
+ */
+function quickStart() {
+  var proc = 'quickStart';
+  var lines = ['=== AI Uribo はじめの設定 ==='];
+  lines.push(safely_(proc, function () { return initSheets(); }, '台帳の作成に失敗しました'));
+
+  // 設定作業中に現場へ誤送信しないよう、最初はテストモードで始める
+  safely_(proc, function () {
+    var row = findRow(SHEETS.SETTING, { 'キー': 'test_mode' });
+    if (row) updateRow(SHEETS.SETTING, row._row, { '値': 'TRUE' });
+    clearSettingCache();
+    lines.push('テストモードをONにしました（LINEには実際には送りません）');
+  });
+
+  lines.push('');
+  lines.push(safely_(proc, function () { return checkSetup(); }, ''));
+  lines.push('');
+  lines.push('【次にやること】');
+  var props = PropertiesService.getScriptProperties();
+  if (!props.getProperty(PROP.TOKEN)) lines.push('1. スクリプトプロパティに LINE_CHANNEL_TOKEN を入れる');
+  if (!props.getProperty(PROP.WEBHOOK_KEY)) lines.push('2. スクリプトプロパティに WEBHOOK_SECRET を入れる（未設定だとWebhookは全拒否）');
+  lines.push('3. ウェブアプリとしてデプロイし、URLの末尾に ?k=＜WEBHOOK_SECRET＞ を付けてLINEに登録');
+  lines.push('4. S1の登録コードを本人に伝え、LINEで送ってもらう');
+  lines.push('5. installTriggers() を実行');
+  lines.push('6. テストが済んだら S8設定の test_mode を FALSE にする（これで本番運用開始）');
+  var text = lines.join('\n');
+  logInfo(proc, '実行しました');
+  return text;
+}
+
+/**
  * セットアップ状態を点検して結果を返す（人間の確認用）。
  * メニュー「AI Uribo」→「セットアップ点検」から実行できる。
  * @return {string} 点検結果
@@ -192,6 +226,11 @@ function checkSetup() {
     return findRows(SHEETS.DEVICE, function (r) { return isTrue_(r['有効']); }).length;
   }, 0);
   out.push('SwitchBot機器（有効） ' + devices + '件');
+  if (isTrue_(getSetting('test_mode', 'FALSE'))) {
+    out.push('★テストモード：ON（LINEには実際に送りません。運用開始時はS8のtest_modeをFALSEに）');
+  } else {
+    out.push('テストモード：OFF（実際にLINEへ送信します）');
+  }
   var staff = findRows(SHEETS.STAFF, function (r) { return isTrue_(r['有効']); });
   var linked = staff.filter(function (r) { return String(r['line_user_id'] || '').trim(); });
   out.push('有効スタッフ ' + staff.length + '名 / LINE紐付け済み ' + linked.length + '名');
@@ -210,6 +249,7 @@ function checkSetup() {
  */
 function onOpen() {
   SpreadsheetApp.getUi().createMenu('AI Uribo')
+    .addItem('はじめの設定（quickStart）', 'menuQuickStart_')
     .addItem('台帳を初期化する（initSheets）', 'initSheets')
     .addItem('セットアップ点検', 'menuCheckSetup_')
     .addItem('登録コードを発行', 'menuIssueCode_')
@@ -227,6 +267,14 @@ function onOpen() {
     .addSeparator()
     .addItem('トリガーを設定する（installTriggers）', 'installTriggers')
     .addToUi();
+}
+
+/**
+ * メニューからはじめの設定を実行する。
+ * @return {void}
+ */
+function menuQuickStart_() {
+  SpreadsheetApp.getUi().alert('AI Uribo はじめの設定', quickStart(), SpreadsheetApp.getUi().ButtonSet.OK);
 }
 
 /**

@@ -32,7 +32,8 @@ function exportDiagnostics(brief) {
     lines.push('Webhook秘密キー: ' + (props.getProperty(PROP.WEBHOOK_KEY) ? '設定済' : '未設定★Webhookは全拒否になります'));
     var missing = SHEET_DEFS.filter(function (d) { return !book_().getSheetByName(d.name); })
       .map(function (d) { return d.name; });
-    lines.push('シート: ' + (missing.length ? '不足あり → ' + missing.join(', ') : '11シートすべてあり'));
+    lines.push('シート: ' + (missing.length ? '不足あり → ' + missing.join(', ')
+      : SHEET_DEFS.length + 'シートすべてあり'));
     var handlers = ScriptApp.getProjectTriggers().map(function (t) { return t.getHandlerFunction(); });
     ['morningBatch', 'nightBatch', 'weeklyDigest', 'dailyBackup', 'flushQueue'].forEach(function (f) {
       if (handlers.indexOf(f) < 0) lines.push('トリガー未設定★: ' + f);
@@ -41,6 +42,8 @@ function exportDiagnostics(brief) {
         .every(function (f) { return handlers.indexOf(f) >= 0; })) {
       lines.push('トリガー: 5本すべて設定済');
     }
+    lines.push('テストモード: ' + (isTrue_(getSetting('test_mode', 'FALSE'))
+      ? 'ON（LINEに実際には送っていません）' : 'OFF（実際に送信します）'));
     lines.push('運用ステージ: ' + getSetting('stage', '1')
       + ' / 朝' + getSetting('morning_batch_hour', '10') + '時'
       + ' 夜' + getSetting('night_batch_hour', '21') + '時');

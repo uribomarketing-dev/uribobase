@@ -160,6 +160,26 @@ function sendToStaff(staffId, messages, opts) {
 
   var body = JSON.stringify(messages);
 
+  // テストモード中は実際には送らない（設定作業中に現場へ誤送信しないため）
+  if (isTrue_(getSetting('test_mode', 'FALSE'))) {
+    if (opts.taskRowNumber) {
+      updateRow(SHEETS.TASK, opts.taskRowNumber, {
+        '送信本文': body, '送信状態': SEND_STATUS.TEST, '送信日時': nowStr_()
+      });
+    } else {
+      appendRow(SHEETS.TASK, {
+        'task_id': nextSeqId_(SHEETS.TASK, 'task_id', 'TSK', 5),
+        '送信先staff_id': staffId,
+        '送信本文': body,
+        '送信状態': SEND_STATUS.TEST,
+        '送信日時': nowStr_(),
+        '作成日時': nowStr_()
+      });
+    }
+    logInfo(label, '【テストモード】送信せず記録のみ: ' + staff['氏名']);
+    return { ok: true, queued: false, detail: 'test_mode' };
+  }
+
   // 同じ内容の再送では必ず同じキーを使う（LINE側が重複を弾けるようにするため）
   var retryKey = opts.retryKey || '';
   if (!retryKey && opts.taskRowNumber) {

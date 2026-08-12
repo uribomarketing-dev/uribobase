@@ -127,6 +127,8 @@ var DEFAULT_SETTINGS = [
   ['register_attempt_limit', '10', '登録コードの入力を1時間に何回まで許すか'],
   ['alert_keywords', '転倒,倒れ,うつ伏せ,座り込,出血,救急,発熱,嘔吐,痙攣,water leak',
    'AIまとめ等の文章にこの語が出たら、社員へすぐLINE通知する（カンマ区切り）'],
+  ['test_mode', 'FALSE',
+   'TRUEの間はLINEに実際には送らず、送信内容をS6に記録するだけ（設定作業中の誤送信防止）。運用開始時にFALSEへ'],
   ['switchbot_poll_hour', '9', 'SwitchBotの状態を取りに行く時刻（朝バッチの前）'],
   ['autofill_estimate', 'TRUE', 'データから推定できるものも積極的に埋めるか（FALSEにすると事実のログだけ埋める）']
 ];
@@ -232,6 +234,7 @@ var SEND_STATUS = {
   WAITING: '待機',   // 連続フローの順番待ち（まだ送っていない）
   QUEUED: 'キュー',  // 深夜帯のため保留（朝に送る）
   SENT: '送信済',
+  TEST: 'テスト',   // test_mode中：実際には送らず内容だけ記録した
   FAILED: '失敗',
   CANCELED: '中止'   // 他の人が先に回答したので送らない
 };

@@ -498,6 +498,21 @@ check('WebhookのURL登録を要求する',
   sbCalls.some(c => c.url.indexOf('setupWebhook') > 0 && String(c.payload).indexOf('exec?k=') > 0));
 sandbox.UrlFetchApp.fetch = realFetch;
 
+console.log('\n=== T7h テストモード（設定作業中の誤送信防止） ===');
+run(`(function(){var r=findRow(SHEETS.SETTING,{'キー':'test_mode'});updateRow(SHEETS.SETTING,r._row,{'値':'TRUE'});clearSettingCache();})()`);
+pushes.length = 0;
+const tmBefore = rows('TASK').length;
+run('weeklyDigest()');
+check('テストモード中はLINEに送らない', pushes.length === 0, pushes.length);
+check('送るはずだった内容はS6に残る',
+  rows('TASK').some(t => String(t.送信状態) === 'テスト'), rows('TASK').slice(-2).map(t => t.送信状態));
+check('診断にテストモードの状態が出る',
+  String(run('exportDiagnostics(true)')).indexOf('テストモード: ON') > 0);
+run(`(function(){var r=findRow(SHEETS.SETTING,{'キー':'test_mode'});updateRow(SHEETS.SETTING,r._row,{'値':'FALSE'});clearSettingCache();})()`);
+pushes.length = 0;
+run('weeklyDigest()');
+check('テストモードを切ると実際に送る', pushes.length > 0, pushes.length);
+
 console.log('\n=== T7c 深夜帯のキュー保存と朝の送信 ===');
 const setQuiet = (s, e) => run(`(function(){
   var a=findRow(SHEETS.SETTING,{'キー':'quiet_start_hour'});updateRow(SHEETS.SETTING,a._row,{'値':${s}});
