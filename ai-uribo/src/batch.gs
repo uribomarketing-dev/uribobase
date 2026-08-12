@@ -284,23 +284,63 @@ function pendingGaps_(filter) {
 }
 
 /**
- * そのスタッフに既に送信済み・送信予定のタスクがある不足を除外する（重複質問の防止）。
+ * そのスタッフに送る不足を絞り込む。
+ *
+ * 同じ日に同じことを二度聞かないのが基本。ただし、
+ * **一度送ったきり返事が無い確認を放置すると、記録が空いたまま週次まで埋もれる**。
+ * そこで一定時間が過ぎたものはもう一度だけお送りする（回数の上限つき。しつこくしない）。
+ * 上限に達したものは催促をやめ、週次ダイジェストで社員がまとめて引き取る。
+ *
  * @param {Array.<Object>} gaps S5の行オブジェクト配列
  * @param {string} staffId staff_id
- * @return {Array.<Object>} 未送信の不足だけの配列
+ * @return {Array.<Object>} 送る不足だけの配列
  */
 function excludeAlreadyAsked_(gaps, staffId) {
-  var asked = {};
+  var remindAfter = getSettingNum('remind_after_hours', 20);
+  var remindMax = getSettingNum('remind_max', 2);
+
+  var answered = {};
+  var times = {};   // gap_id → その人に送った回数
+  var latest = {};  // gap_id → 最後に送った（または作った）日時
+
   findRows(SHEETS.TASK, function (r) {
     var st = String(r['送信状態']);
     return String(r['送信先staff_id']) === String(staffId)
       && (st === SEND_STATUS.WAITING || st === SEND_STATUS.QUEUED || st === SEND_STATUS.SENT);
   }).forEach(function (t) {
-    // 「後で（明日また聞いて）」と答えた項目は、翌日また聞くので除外しない
+    var id = String(t['gap_id']);
+    // 「後で（明日また聞いて）」と答えた項目は、翌日また聞くので数に入れない
     if (String(t['回答'] || '').indexOf('後で') === 0) return;
-    asked[String(t['gap_id'])] = true;
+    if (String(t['回答'] || '').trim()) { answered[id] = true; return; }
+
+    times[id] = (times[id] || 0) + 1;
+    var when = toDateTimeStr_(t['送信日時']) || toDateTimeStr_(t['作成日時']);
+    if (!latest[id] || when > latest[id]) latest[id] = when;
   });
-  return gaps.filter(function (g) { return !asked[String(g['gap_id'])]; });
+
+  return gaps.filter(function (g) {
+    var id = String(g['gap_id']);
+    if (answered[id]) return false;              // もう答えていただいている
+    if (!times[id]) return true;                 // まだ送っていない
+    if (times[id] > remindMax) return false;     // これ以上は催促しない（週次で社員へ）
+    return hoursSince_(latest[id]) >= remindAfter;
+  });
+}
+
+/**
+ * その一覧に「一度送ったが返事が無いもの」が含まれるか。
+ * 見出しに一言添えて、催促されたと感じさせないための判定。
+ * @param {Array.<Object>} gaps 送る不足
+ * @param {string} staffId staff_id
+ * @return {boolean} 含まれていればtrue
+ */
+function includesReask_(gaps, staffId) {
+  var sent = {};
+  findRows(SHEETS.TASK, function (r) {
+    return String(r['送信先staff_id']) === String(staffId)
+      && String(r['送信状態']) === SEND_STATUS.SENT;
+  }).forEach(function (t) { sent[String(t['gap_id'])] = true; });
+  return gaps.some(function (g) { return sent[String(g['gap_id'])]; });
 }
 
 /**
@@ -335,7 +375,10 @@ function dispatchPendingGaps_(gapFilter, title, proc) {
     safely_(proc, function () {
       var list = excludeAlreadyAsked_(byStaff[staffId], staffId);
       if (!list.length) return;
-      var r = createAndSendSet(staffId, list, title);
+      var head = includesReask_(list, staffId)
+        ? title + '\n※前回お答えいただけなかった分も入っています'
+        : title;
+      var r = createAndSendSet(staffId, list, head);
       if (r.sent) sent += r.count;
     });
   });

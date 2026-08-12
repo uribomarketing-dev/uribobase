@@ -176,6 +176,19 @@ function updateRow(sheetName, rowNumber, patch) {
 }
 
 /**
+ * その日時から今までに何時間経ったかを返す。
+ * @param {string|Date} value 日時（空なら0を返す）
+ * @return {number} 経過時間（時間）
+ */
+function hoursSince_(value) {
+  var text = toDateTimeStr_(value);
+  if (!text) return 0;
+  var t = new Date(text.substring(0, 10) + 'T' + (text.substring(11) || '00:00') + ':00+09:00').getTime();
+  if (!t) return 0;
+  return (new Date().getTime() - t) / 3600000;
+}
+
+/**
  * ScriptLockを取って処理を実行する（再入可能）。
  * すでに同じ実行の中でロックを持っている場合は取り直さず、内側で解放もしない。
  * 全ての書き込み処理をこの関数で包むことで、「読んで無ければ追記」の競合を防ぐ。

@@ -173,7 +173,9 @@ var DEFAULT_SETTINGS = [
   ['archive_after_days', '180', '実績ログ・完了した不足・回答済みの確認を、何日過ぎたら保管へ移すか'],
   ['log_keep_days', '90', '実行ログを何日分手元に残すか'],
   ['sheet_warn_rows', '20000', 'この行数を超えたら自己点検で知らせる'],
-  ['monthly_report_hour', '11', '月次まとめ（毎月1日・前月分）の実行時刻']
+  ['monthly_report_hour', '11', '月次まとめ（毎月1日・前月分）の実行時刻'],
+  ['remind_after_hours', '20', 'お返事が無い確認を、何時間経ったらもう一度お送りするか'],
+  ['remind_max', '2', '同じ確認をお送りし直す上限回数（これを超えたら催促せず、週次でまとめて社員へ）']
 ];
 
 /** 学習の段階 @type {Object.<string,string>} */
@@ -524,6 +526,19 @@ function updateRow(sheetName, rowNumber, patch) {
   var current = sh.getRange(rowNumber, min + 1, 1, max - min + 1).getValues()[0];
   indexes.forEach(function (e) { current[e.idx - min] = patch[e.key]; });
   sh.getRange(rowNumber, min + 1, 1, current.length).setValues([current]);
+}
+
+/**
+ * その日時から今までに何時間経ったかを返す。
+ * @param {string|Date} value 日時（空なら0を返す）
+ * @return {number} 経過時間（時間）
+ */
+function hoursSince_(value) {
+  var text = toDateTimeStr_(value);
+  if (!text) return 0;
+  var t = new Date(text.substring(0, 10) + 'T' + (text.substring(11) || '00:00') + ':00+09:00').getTime();
+  if (!t) return 0;
+  return (new Date().getTime() - t) / 3600000;
 }
 
 /**
@@ -4077,23 +4092,63 @@ function pendingGaps_(filter) {
 }
 
 /**
- * そのスタッフに既に送信済み・送信予定のタスクがある不足を除外する（重複質問の防止）。
+ * そのスタッフに送る不足を絞り込む。
+ *
+ * 同じ日に同じことを二度聞かないのが基本。ただし、
+ * **一度送ったきり返事が無い確認を放置すると、記録が空いたまま週次まで埋もれる**。
+ * そこで一定時間が過ぎたものはもう一度だけお送りする（回数の上限つき。しつこくしない）。
+ * 上限に達したものは催促をやめ、週次ダイジェストで社員がまとめて引き取る。
+ *
  * @param {Array.<Object>} gaps S5の行オブジェクト配列
  * @param {string} staffId staff_id
- * @return {Array.<Object>} 未送信の不足だけの配列
+ * @return {Array.<Object>} 送る不足だけの配列
  */
 function excludeAlreadyAsked_(gaps, staffId) {
-  var asked = {};
+  var remindAfter = getSettingNum('remind_after_hours', 20);
+  var remindMax = getSettingNum('remind_max', 2);
+
+  var answered = {};
+  var times = {};   // gap_id → その人に送った回数
+  var latest = {};  // gap_id → 最後に送った（または作った）日時
+
   findRows(SHEETS.TASK, function (r) {
     var st = String(r['送信状態']);
     return String(r['送信先staff_id']) === String(staffId)
       && (st === SEND_STATUS.WAITING || st === SEND_STATUS.QUEUED || st === SEND_STATUS.SENT);
   }).forEach(function (t) {
-    // 「後で（明日また聞いて）」と答えた項目は、翌日また聞くので除外しない
+    var id = String(t['gap_id']);
+    // 「後で（明日また聞いて）」と答えた項目は、翌日また聞くので数に入れない
     if (String(t['回答'] || '').indexOf('後で') === 0) return;
-    asked[String(t['gap_id'])] = true;
+    if (String(t['回答'] || '').trim()) { answered[id] = true; return; }
+
+    times[id] = (times[id] || 0) + 1;
+    var when = toDateTimeStr_(t['送信日時']) || toDateTimeStr_(t['作成日時']);
+    if (!latest[id] || when > latest[id]) latest[id] = when;
   });
-  return gaps.filter(function (g) { return !asked[String(g['gap_id'])]; });
+
+  return gaps.filter(function (g) {
+    var id = String(g['gap_id']);
+    if (answered[id]) return false;              // もう答えていただいている
+    if (!times[id]) return true;                 // まだ送っていない
+    if (times[id] > remindMax) return false;     // これ以上は催促しない（週次で社員へ）
+    return hoursSince_(latest[id]) >= remindAfter;
+  });
+}
+
+/**
+ * その一覧に「一度送ったが返事が無いもの」が含まれるか。
+ * 見出しに一言添えて、催促されたと感じさせないための判定。
+ * @param {Array.<Object>} gaps 送る不足
+ * @param {string} staffId staff_id
+ * @return {boolean} 含まれていればtrue
+ */
+function includesReask_(gaps, staffId) {
+  var sent = {};
+  findRows(SHEETS.TASK, function (r) {
+    return String(r['送信先staff_id']) === String(staffId)
+      && String(r['送信状態']) === SEND_STATUS.SENT;
+  }).forEach(function (t) { sent[String(t['gap_id'])] = true; });
+  return gaps.some(function (g) { return sent[String(g['gap_id'])]; });
 }
 
 /**
@@ -4128,7 +4183,10 @@ function dispatchPendingGaps_(gapFilter, title, proc) {
     safely_(proc, function () {
       var list = excludeAlreadyAsked_(byStaff[staffId], staffId);
       if (!list.length) return;
-      var r = createAndSendSet(staffId, list, title);
+      var head = includesReask_(list, staffId)
+        ? title + '\n※前回お答えいただけなかった分も入っています'
+        : title;
+      var r = createAndSendSet(staffId, list, head);
       if (r.sent) sent += r.count;
     });
   });
@@ -5387,6 +5445,7 @@ function selfCheckBody_(proc) {
   safely_(proc, function () { checkLearning_(issues); });
   safely_(proc, function () { checkSheetSize_(issues); });
   safely_(proc, function () { checkSlowBatch_(issues); });
+  safely_(proc, function () { checkSiteNames_(issues); });
 
   var summary = '要対応' + issues.length + '件 / 自動修復' + fixed.length + '件';
   if (fixed.length) logInfo(proc, '自動修復: ' + fixed.join(' / '));
@@ -5584,6 +5643,41 @@ function checkSheetSize_(issues) {
     issues.push('台帳が大きくなっています：' + big.join('・')
       + '。自動整理が効いているかご確認ください（S8設定 archive_enabled）');
   }
+}
+
+/**
+ * 拠点名の書き方がそろっているかを見る。
+ *
+ * 「清水」と「うりぼベース清水」のように書き方がぶれると、
+ * シフト表の夜勤がどの拠点のものか分からなくなり、機器も利用者に結びつかない。
+ * 表記ゆれは画面上は些細に見えて、記録が静かに欠ける原因になる。
+ * @param {Array.<string>} issues 要対応の配列（追記される）
+ * @return {void}
+ */
+function checkSiteNames_(issues) {
+  var known = {};
+  findRows(SHEETS.USER, function (r) { return isTrue_(r['有効']); })
+    .forEach(function (u) { if (u['拠点']) known[String(u['拠点']).trim()] = true; });
+  if (!Object.keys(known).length) return;   // 利用者未登録。ここでは騒がない
+
+  var odd = {};
+  var since = addDays_(todayStr_(), -7);
+  findRows(SHEETS.SHIFT_PLAN, function (r) { return toDateStr_(r['日付']) >= since; })
+    .forEach(function (r) {
+      var site = String(r['拠点'] || '').trim();
+      if (site && !known[site]) odd[site] = 'シフト表';
+    });
+  findRows(SHEETS.DEVICE, function (r) { return isTrue_(r['有効']); })
+    .forEach(function (r) {
+      var site = String(r['拠点'] || '').trim();
+      if (site && !known[site]) odd[site] = '機器マスタ';
+    });
+
+  var names = Object.keys(odd);
+  if (!names.length) return;
+  issues.push('拠点名の書き方がそろっていません：'
+    + names.map(function (n) { return '「' + n + '」（' + odd[n] + '）'; }).join('・')
+    + '。S2_利用者マスタの拠点（' + Object.keys(known).join('・') + '）と同じ書き方に直してください');
 }
 
 /**

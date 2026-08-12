@@ -45,6 +45,7 @@ function selfCheckBody_(proc) {
   safely_(proc, function () { checkLearning_(issues); });
   safely_(proc, function () { checkSheetSize_(issues); });
   safely_(proc, function () { checkSlowBatch_(issues); });
+  safely_(proc, function () { checkSiteNames_(issues); });
 
   var summary = '要対応' + issues.length + '件 / 自動修復' + fixed.length + '件';
   if (fixed.length) logInfo(proc, '自動修復: ' + fixed.join(' / '));
@@ -242,6 +243,41 @@ function checkSheetSize_(issues) {
     issues.push('台帳が大きくなっています：' + big.join('・')
       + '。自動整理が効いているかご確認ください（S8設定 archive_enabled）');
   }
+}
+
+/**
+ * 拠点名の書き方がそろっているかを見る。
+ *
+ * 「清水」と「うりぼベース清水」のように書き方がぶれると、
+ * シフト表の夜勤がどの拠点のものか分からなくなり、機器も利用者に結びつかない。
+ * 表記ゆれは画面上は些細に見えて、記録が静かに欠ける原因になる。
+ * @param {Array.<string>} issues 要対応の配列（追記される）
+ * @return {void}
+ */
+function checkSiteNames_(issues) {
+  var known = {};
+  findRows(SHEETS.USER, function (r) { return isTrue_(r['有効']); })
+    .forEach(function (u) { if (u['拠点']) known[String(u['拠点']).trim()] = true; });
+  if (!Object.keys(known).length) return;   // 利用者未登録。ここでは騒がない
+
+  var odd = {};
+  var since = addDays_(todayStr_(), -7);
+  findRows(SHEETS.SHIFT_PLAN, function (r) { return toDateStr_(r['日付']) >= since; })
+    .forEach(function (r) {
+      var site = String(r['拠点'] || '').trim();
+      if (site && !known[site]) odd[site] = 'シフト表';
+    });
+  findRows(SHEETS.DEVICE, function (r) { return isTrue_(r['有効']); })
+    .forEach(function (r) {
+      var site = String(r['拠点'] || '').trim();
+      if (site && !known[site]) odd[site] = '機器マスタ';
+    });
+
+  var names = Object.keys(odd);
+  if (!names.length) return;
+  issues.push('拠点名の書き方がそろっていません：'
+    + names.map(function (n) { return '「' + n + '」（' + odd[n] + '）'; }).join('・')
+    + '。S2_利用者マスタの拠点（' + Object.keys(known).join('・') + '）と同じ書き方に直してください');
 }
 
 /**

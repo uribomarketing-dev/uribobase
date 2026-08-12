@@ -157,7 +157,9 @@ var DEFAULT_SETTINGS = [
   ['archive_after_days', '180', '実績ログ・完了した不足・回答済みの確認を、何日過ぎたら保管へ移すか'],
   ['log_keep_days', '90', '実行ログを何日分手元に残すか'],
   ['sheet_warn_rows', '20000', 'この行数を超えたら自己点検で知らせる'],
-  ['monthly_report_hour', '11', '月次まとめ（毎月1日・前月分）の実行時刻']
+  ['monthly_report_hour', '11', '月次まとめ（毎月1日・前月分）の実行時刻'],
+  ['remind_after_hours', '20', 'お返事が無い確認を、何時間経ったらもう一度お送りするか'],
+  ['remind_max', '2', '同じ確認をお送りし直す上限回数（これを超えたら催促せず、週次でまとめて社員へ）']
 ];
 
 /** 学習の段階 @type {Object.<string,string>} */

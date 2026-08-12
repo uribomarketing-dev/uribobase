@@ -1041,7 +1041,9 @@ check('前回と同じ内容なら送らない', pushes.length === 0, pushes.len
 clearCache();
 run(`(function(){
   // 機器から今日ぶんの通知が届いている状態にする（届いていれば知らせない、を確かめる）
+  // 拠点名も利用者マスタとそろえておく（ゆれの指摘とは別の検証なので）
   findRows(SHEETS.DEVICE,function(r){return isTrue_(r['有効']);}).forEach(function(d){
+    updateRow(SHEETS.DEVICE,d._row,{'拠点':'清水'});
     appendRow(SHEETS.LOG_IMPORT,{log_id:nextSeqId_(SHEETS.LOG_IMPORT,'log_id','LOG',6),
       発生日:todayStr_(),対象種別:'raw_door',対象:'TEST01',項目名:'玄関',値:'開',
       取込元:'switchbot-webhook:'+d['deviceId'],取込日時:nowStr_()});
@@ -1117,6 +1119,79 @@ check('自己点検が処理の遅れに気づいて知らせる',
   JSON.stringify(pushes).indexOf('時間内に終わらず') > 0, JSON.stringify(pushes).substring(0, 300));
 check('実行にかかった秒数が実行ログに残る（遅くなってきたら分かる）',
   String(run('morningBatch()')).indexOf('秒') > 0);
+
+console.log('\n=== T20 拠点名の書き方のゆれ ===');
+run(`(function(){
+  var u=findRow(SHEETS.USER,{'user_code':'TEST01'});updateRow(SHEETS.USER,u._row,{'有効':true,'拠点':'清水'});
+  appendRow(SHEETS.SHIFT_PLAN,{日付:todayStr_(),staff_id:'STF002',拠点:'うりぼベース清水',
+    勤務区分:'夜勤',開始時刻:'',終了時刻:'',取込元:'test'});
+})()`);
+clearCache();
+pushes.length = 0;
+run('selfCheck()');
+check('拠点名のゆれに気づいて知らせる',
+  JSON.stringify(pushes).indexOf('拠点名の書き方がそろっていません') > 0
+    && JSON.stringify(pushes).indexOf('うりぼベース清水') > 0, JSON.stringify(pushes).substring(0, 300));
+run(`(function(){
+  findRows(SHEETS.SHIFT_PLAN,function(r){return String(r['拠点'])==='うりぼベース清水';})
+    .forEach(function(r){updateRow(SHEETS.SHIFT_PLAN,r._row,{'拠点':'清水'});});
+})()`);
+clearCache();
+pushes.length = 0;
+run('selfCheck()');
+check('そろえれば指摘は消える',
+  JSON.stringify(pushes).indexOf('拠点名の書き方') < 0, JSON.stringify(pushes).substring(0, 200));
+
+console.log('\n=== T19 お返事が無い確認の聞き直し ===');
+// 一度送ったきり返事が無い確認を放置すると、記録が空いたまま週次まで埋もれる
+run(`(function(){
+  appendRow(SHEETS.GAP,{gap_id:'GAP-REMIND-1',対象日:todayStr_(),check_id:'CHK001',対象:'STF002',
+    状態:'検出',検出日時:nowStr_(),一次確認先staff_id:'STF002',完了日時:''});
+})()`);
+const remindGap = run(`findRows(SHEETS.GAP,function(r){return r['gap_id']==='GAP-REMIND-1';})`);
+pushes.length = 0;
+run(`dispatchPendingGaps_(function(g){return String(g['gap_id'])==='GAP-REMIND-1';},'【確認】','remindTest')`);
+check('1回目は普通に届く', pushes.length === 1, pushes.length);
+pushes.length = 0;
+run(`dispatchPendingGaps_(function(g){return String(g['gap_id'])==='GAP-REMIND-1';},'【確認】','remindTest')`);
+check('送った直後は二度聞きしない', pushes.length === 0, pushes.length);
+
+// 時間が経ったら、もう一度だけお送りする
+const ageTask = hours => run(`(function(){
+  findRows(SHEETS.TASK,function(r){return r['gap_id']==='GAP-REMIND-1';}).forEach(function(t){
+    updateRow(SHEETS.TASK,t._row,{'送信日時':toDateTimeStr_(new Date(new Date().getTime()-${hours}*3600000)),
+      '作成日時':toDateTimeStr_(new Date(new Date().getTime()-${hours}*3600000))});
+  });
+})()`);
+ageTask(24);
+pushes.length = 0;
+run(`dispatchPendingGaps_(function(g){return String(g['gap_id'])==='GAP-REMIND-1';},'【確認】','remindTest')`);
+check('丸1日返事が無ければ、もう一度お送りする', pushes.length === 1, pushes.length);
+check('催促に見えないよう一言添える',
+  JSON.stringify(pushes).indexOf('前回お答えいただけなかった分') > 0, JSON.stringify(pushes).substring(0, 200));
+
+// しつこくしない（上限を超えたら催促をやめ、週次で社員が引き取る）
+ageTask(48);
+pushes.length = 0;
+run(`dispatchPendingGaps_(function(g){return String(g['gap_id'])==='GAP-REMIND-1';},'【確認】','remindTest')`);
+check('上限までは聞き直す', pushes.length === 1, pushes.length);
+ageTask(72);
+pushes.length = 0;
+run(`dispatchPendingGaps_(function(g){return String(g['gap_id'])==='GAP-REMIND-1';},'【確認】','remindTest')`);
+check('上限を超えたら催促しない（週次で社員へ）', pushes.length === 0, pushes.length);
+check('未完了なので週次の一覧には残る',
+  rows('GAP').some(g => g.gap_id === 'GAP-REMIND-1' && String(g.状態) !== '完了'));
+
+// 答えていただいた項目は、時間が経っても聞き直さない
+run(`(function(){
+  var g=findRow(SHEETS.GAP,{'gap_id':'GAP-REMIND-1'});updateRow(SHEETS.GAP,g._row,{'状態':'検出'});
+  findRows(SHEETS.TASK,function(r){return r['gap_id']==='GAP-REMIND-1';}).forEach(function(t){
+    updateRow(SHEETS.TASK,t._row,{'回答':'今答える','回答日時':nowStr_()});
+  });
+})()`);
+pushes.length = 0;
+run(`dispatchPendingGaps_(function(g){return String(g['gap_id'])==='GAP-REMIND-1';},'【確認】','remindTest')`);
+check('答えていただいた項目は聞き直さない', pushes.length === 0, pushes.length);
 
 console.log('\n=== T18 GAS貼り付け用の全部入りファイル ===');
 const bundler = require('../tools/bundle.js');
