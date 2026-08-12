@@ -12,6 +12,12 @@
  *   ・そこから推測できること（服薬した可能性・在宅していた可能性 等）→ 推定として埋める（要精査=TRUE）
  *   ・推定を止めたいときは S8設定 autofill_estimate を FALSE にすれば事実だけになる
  *
+ * 【精度が上がる仕組み】
+ * 推定で埋めても、それだけでは当たっているか分からない。そこで当面は推定で埋めたうえで
+ * 人にも同じことを聞き、回答と突き合わせて情報源ごとの精度を貯める（learn.gs）。
+ * 十分に当たると分かった組み合わせは質問をやめ、外れが増えたら聞き直しに戻す。
+ * 結果として、使うほど質問が減り、精度は保たれる。
+ *
  * 実接続（ファイル形式・置き場所）はStage2で確定。現時点では
  * 「S4に生ログが入っていれば正規化して充足する」器として実装してある。
  * 生ログの入れ方は docs/自動ソース取込フォーマット.md を参照。
@@ -23,6 +29,9 @@
  *   項目名   … S3チェック項目マスタの項目名（これに一致すると、その質問は人に聞かなくなる）
  *   値       … 記録する値（何を根拠にしたか分かる書き方にする）
  *   推定     … true なら「データからの推定」。要精査=TRUEで記録し、現場が精査できるようにする
+ *   推定回答 … AIが「たぶんこの選択肢だろう」と読んだ答え（S3の選択肢と同じ文字列）。
+ *              これが入っている推定だけが、人の回答と突き合わされて学習の対象になる。
+ *              センサーからは選択肢を決めようがないもの（服薬の声かけ等）には持たせない＝ずっと人に聞く
  *   全利用者 … true なら有効な利用者全員に展開する（献立など全体に効く情報）
  * @type {Array.<Object>}
  */
@@ -49,7 +58,8 @@ var AUTOFILL_SOURCES = [
     必要フラグ: '在否自動',
     説明: '開閉センサーログ → 在否確認・夜間の動き・夜間巡回（推定）',
     map: function (raw) {
-      var out = [{ 項目名: '在否確認', 値: '在室（開閉センサー自動記録）' }];
+      var out = [{ 項目名: '在否確認', 値: '在室とみられる（開閉センサー自動記録）',
+                   推定: true, 推定回答: '在宅' }];
       if (String(raw['項目名']).indexOf('夜間') >= 0) {
         var v = String(raw['値'] || '').trim();
         out.push({ 項目名: '夜間の動き', 値: '夜間の開閉を検知' + (v ? ' ' + v : '') + '（開閉センサー自動記録）' });
@@ -65,7 +75,8 @@ var AUTOFILL_SOURCES = [
     説明: '人感・Presenceセンサー → 在否確認・夜間巡回（推定）',
     map: function (raw) {
       var night = String(raw['項目名']).indexOf('夜間') >= 0;
-      var out = [{ 項目名: '在否確認', 値: '在室（人感センサー自動記録）' }];
+      var out = [{ 項目名: '在否確認', 値: '在室とみられる（人感センサー自動記録）',
+                   推定: true, 推定回答: '在宅' }];
       if (night) {
         out.push({ 項目名: '夜間の動き', 値: String(raw['値'] || '夜間に動きを検知') + '（人感センサー自動記録）' });
         out.push({ 項目名: '夜間巡回・就寝確認', 値: '居室で動きあり（人感センサー自動記録・要精査）', 推定: true });
@@ -102,8 +113,8 @@ var AUTOFILL_SOURCES = [
     説明: 'うりぼラボ出勤情報 → 在否確認・日中活動',
     map: function (raw) {
       return [
-        { 項目名: '在否確認', 値: '在宅（ラボ出勤記録より）' },
-        { 項目名: '日中活動', 値: 'ラボ出勤（出勤記録より）' }
+        { 項目名: '在否確認', 値: '在宅（ラボ出勤記録より）', 推定: true, 推定回答: '在宅' },
+        { 項目名: '日中活動', 値: 'ラボ出勤（出勤記録より）', 推定: true, 推定回答: '参加した' }
       ];
     }
   },
@@ -120,7 +131,7 @@ var AUTOFILL_SOURCES = [
         out.push({
           項目名: '食事提供',
           値: '提供あり（献立記録：' + truncate_(value, 40) + '／要精査）',
-          推定: true, 全利用者: true
+          推定: true, 推定回答: '朝夕とも提供', 全利用者: true
         });
       }
       return out;
@@ -178,20 +189,20 @@ var AUTOFILL_SOURCES = [
       var name = String(raw['項目名']);
       var value = String(raw['値']).split('／')[0].trim();
       var pairs = {
-        '予定_帰省': { 'あり': { 項目名: '在否確認', 値: '外泊・帰省（前夜の予定より）' } },
+        '予定_帰省': { 'あり': { 項目名: '在否確認', 値: '外泊・帰省（前夜の予定より）', 推定回答: '外泊・帰省' } },
         '予定_外出': {
-          'あり': { 項目名: '外出・帰宅時間', 値: '外出あり（前夜の予定より）' },
-          'なし': { 項目名: '外出・帰宅時間', 値: '外出なし（前夜の予定より）' }
+          'あり': { 項目名: '外出・帰宅時間', 値: '外出あり（前夜の予定より）', 推定回答: '外出あり（一言記入）' },
+          'なし': { 項目名: '外出・帰宅時間', 値: '外出なし（前夜の予定より）', 推定回答: '外出なし' }
         },
-        '予定_ラボ出勤': { 'あり': { 項目名: '日中活動', 値: 'ラボ出勤（前夜の予定より）' } },
+        '予定_ラボ出勤': { 'あり': { 項目名: '日中活動', 値: 'ラボ出勤（前夜の予定より）', 推定回答: '参加した' } },
         '予定_食事': {
-          '朝夕とも必要': { 項目名: '食事提供', 値: '朝夕とも提供（前夜の予定より）' },
-          '不要': { 項目名: '食事提供', 値: '提供なし（前夜の予定より）' }
+          '朝夕とも必要': { 項目名: '食事提供', 値: '朝夕とも提供（前夜の予定より）', 推定回答: '朝夕とも提供' },
+          '不要': { 項目名: '食事提供', 値: '提供なし（前夜の予定より）', 推定回答: '提供なし' }
         }
       };
       var hit = pairs[name] && pairs[name][value];
       if (!hit) return [];
-      return [{ 項目名: hit.項目名, 値: hit.値 + '（要精査）', 推定: true }];
+      return [{ 項目名: hit.項目名, 値: hit.値 + '（要精査）', 推定: true, 推定回答: hit.推定回答 }];
     }
   }
 ];
@@ -199,20 +210,20 @@ var AUTOFILL_SOURCES = [
 /**
  * 自動充足を実行する。detectGaps の直前に必ず呼ぶこと。
  * @param {string} targetDate 対象日 YYYY-MM-DD
- * @return {{filled:number, estimated:number, bySource:Object.<string,number>, skipped:number}} 充足結果
+ * @return {{filled:number, estimated:number, autoConfirmed:number, bySource:Object.<string,number>, skipped:number}} 充足結果
  */
 function runAutoFill(targetDate) {
   var proc = 'runAutoFill';
   // 「無ければ書く」の判定と追記の間に他の実行が割り込まないよう直列化する（再入可能）
   return withLock_(proc, 120000, function () { return runAutoFillBody_(proc, targetDate); },
-    function () { return { filled: 0, estimated: 0, bySource: {}, skipped: 0 }; });
+    function () { return { filled: 0, estimated: 0, autoConfirmed: 0, bySource: {}, skipped: 0 }; });
 }
 
 /**
  * 自動充足の本体（ロック取得済みの状態で呼ばれる）。
  * @param {string} proc ログ用の処理名
  * @param {string} targetDate 対象日 YYYY-MM-DD
- * @return {{filled:number, estimated:number, bySource:Object.<string,number>, skipped:number}} 充足結果
+ * @return {{filled:number, estimated:number, autoConfirmed:number, bySource:Object.<string,number>, skipped:number}} 充足結果
  */
 function runAutoFillBody_(proc, targetDate) {
   var date = toDateStr_(targetDate);
@@ -234,7 +245,7 @@ function runAutoFillBody_(proc, targetDate) {
     if (String(r['対象種別']) === 'support') have[r['対象'] + '\t' + r['項目名']] = true;
   });
 
-  var result = { filled: 0, estimated: 0, bySource: {}, skipped: 0 };
+  var result = { filled: 0, estimated: 0, autoConfirmed: 0, bySource: {}, skipped: 0 };
 
   AUTOFILL_SOURCES.forEach(function (src) {
     result.bySource[src.id] = 0;
@@ -266,9 +277,11 @@ function runAutoFillBody_(proc, targetDate) {
               var key = target + '\t' + fill.項目名;
               if (have[key]) { result.skipped++; return; }
               have[key] = true;
-              writeAutoFill_(date, target, fill, src.id);
+              var certainty = certaintyOf_(src.id, fill);
+              writeAutoFill_(date, target, fill, src.id, certainty);
               result.filled++;
               if (fill.推定) result.estimated++;
+              if (certainty === CERTAINTY.AUTO) result.autoConfirmed++;
               result.bySource[src.id]++;
             });
           });
@@ -276,20 +289,41 @@ function runAutoFillBody_(proc, targetDate) {
     });
   });
 
-  logInfo(proc, '自動充足 ' + result.filled + '件（うち推定 ' + result.estimated + '件・'
+  logInfo(proc, '自動充足 ' + result.filled + '件（うち推定 ' + result.estimated + '件'
+    + '／学習済みで質問を省いたもの ' + result.autoConfirmed + '件・'
     + JSON.stringify(result.bySource) + '） / スキップ ' + result.skipped + '件');
   return result;
+}
+
+/**
+ * この1件を「人にも確認するか、もう確認しないか」を学習の実績から決める。
+ *
+ * ・事実のログ（推定ではない）           → 確定。もともと質問しない
+ * ・推定回答を持たない推定               → 推定。ずっと人に聞く（機械には決めようがないもの）
+ * ・学習が「自動確定」まで育った推定     → 自動確定。人に聞かない（ただし抜き打ちの回だけは聞く）
+ * ・それ以外の推定（学習中・要見直し）   → 推定。埋めたうえで人にも聞き、当たり外れを貯める
+ * @param {string} sourceId 自動ソースのid
+ * @param {{項目名:string, 推定:boolean, 推定回答:string}} fill 充足内容
+ * @return {string} CERTAINTY のいずれか
+ */
+function certaintyOf_(sourceId, fill) {
+  if (!fill.推定) return CERTAINTY.FIXED;
+  if (!fill.推定回答) return CERTAINTY.ESTIMATED;
+  if (learnStage_(sourceId, fill.項目名) !== LEARN_STAGE.AUTO) return CERTAINTY.ESTIMATED;
+  return learnSpotCheckDue_(sourceId, fill.項目名) ? CERTAINTY.ESTIMATED : CERTAINTY.AUTO;
 }
 
 /**
  * 自動充足の1件をS4（記録）とS7（既存アプリへの還元）に書く。
  * @param {string} date 対象日
  * @param {string} target 対象（user_code など）
- * @param {{項目名:string, 値:string, 推定:boolean}} fill 充足内容
+ * @param {{項目名:string, 値:string, 推定:boolean, 推定回答:string}} fill 充足内容
  * @param {string} sourceId 自動ソースのid
+ * @param {string} certainty 確度（CERTAINTY）
  * @return {void}
  */
-function writeAutoFill_(date, target, fill, sourceId) {
+function writeAutoFill_(date, target, fill, sourceId, certainty) {
+  var level = certainty || (fill.推定 ? CERTAINTY.ESTIMATED : CERTAINTY.FIXED);
   appendRow(SHEETS.LOG_IMPORT, {
     'log_id': nextSeqId_(SHEETS.LOG_IMPORT, 'log_id', 'LOG', 6),
     '発生日': date,
@@ -298,7 +332,9 @@ function writeAutoFill_(date, target, fill, sourceId) {
     '項目名': fill.項目名,
     '値': fill.値,
     '取込元': sourceId,
-    '取込日時': nowStr_()
+    '取込日時': nowStr_(),
+    '確度': level,
+    '推定回答': fill.推定回答 || ''
   });
   appendRow(SHEETS.FILL, {
     'fill_id': nextSeqId_(SHEETS.FILL, 'fill_id', 'FIL', 6),
@@ -309,8 +345,10 @@ function writeAutoFill_(date, target, fill, sourceId) {
     '記入者staff_id': 'AUTO:' + sourceId,
     '取込済フラグ': false,
     '作成日時': nowStr_(),
-    '情報源': (fill.推定 ? '自動推定（' : '自動ログ（') + sourceId + '）',
-    '要精査': fill.推定 ? true : false
+    '情報源': (fill.推定 ? '自動推定（' : '自動ログ（') + sourceId
+      + (level === CERTAINTY.AUTO ? '・学習済み' : '') + '）',
+    '要精査': fill.推定 ? true : false,
+    '精査結果': ''
   });
 }
 

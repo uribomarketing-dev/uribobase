@@ -310,6 +310,11 @@ function finishTurn_(task, replyToken) {
  * @return {boolean} 追記として処理したらtrue
  */
 function handleNote_(staff, text, replyToken) {
+  // コマンドは一言記述として取り込まない。
+  // 追記を求めたまま返事が無い状態は珍しくなく、そこへ「診断」等が来たときに
+  // それを台帳の一言欄に書いてしまうと、記録が読めないものになるため。
+  if (COMMAND_WORDS.indexOf(String(text).trim()) >= 0) return false;
+
   var pending = findRows(SHEETS.TASK, function (r) {
     return String(r['送信先staff_id']) === String(staff['staff_id']) && isTrue_(r['追記待ち']);
   }).sort(function (a, b) {
@@ -360,6 +365,10 @@ function recordFill_(gap, check, value, staff) {
     return;
   }
 
+  // AIが先に推定で埋めていた場合は、人の回答と突き合わせて精度の実績を貯める（learn.gs）。
+  // 当たる組み合わせはやがて質問されなくなり、外れが増えれば聞き直しに戻る。
+  var learned = learnFromAnswer_(date, String(gap['対象']), itemName, value);
+
   // シフト希望は対象月（YYYY-MM）を値に含める。R01がこの値を見て「回答済み」と判定するため。
   if (kind === 'shift') value = date.substring(0, 7) + ' ' + value;
 
@@ -374,19 +383,60 @@ function recordFill_(gap, check, value, staff) {
     '作成日時': nowStr_(),
     'gap_id': gapId,
     '情報源': fillSourceOf_(gap, staff),
-    '要精査': false
+    '要精査': false,
+    '精査結果': ''
   });
 
-  appendRow(SHEETS.LOG_IMPORT, {
-    'log_id': nextSeqId_(SHEETS.LOG_IMPORT, 'log_id', 'LOG', 6),
-    '発生日': date,
-    '対象種別': kind,
-    '対象': String(gap['対象']),
-    '項目名': itemName,
+  // 推定で先に埋めていた行があれば、そこを人の回答で上書きする（同じ項目が2行に増えないように）
+  if (!supersedeEstimate_(date, String(gap['対象']), itemName, value)) {
+    appendRow(SHEETS.LOG_IMPORT, {
+      'log_id': nextSeqId_(SHEETS.LOG_IMPORT, 'log_id', 'LOG', 6),
+      '発生日': date,
+      '対象種別': kind,
+      '対象': String(gap['対象']),
+      '項目名': itemName,
+      '値': value,
+      '取込元': 'ai-uribo',
+      '取込日時': nowStr_(),
+      '確度': CERTAINTY.FIXED,
+      '推定回答': ''
+    });
+  }
+
+  if (learned.突合) {
+    logInfo('recordFill_', '推定と回答の突き合わせ: ' + itemName + '（' + learned.情報源 + '）→ '
+      + (learned.一致 ? '一致' : '不一致'));
+  }
+}
+
+/**
+ * その日・その利用者・その項目に推定の記録が既にあれば、人の回答で上書きする。
+ *
+ * 推定は「まだ確かめていない仮の記録」なので、人が答えた時点で役目を終える。
+ * 行を増やさず上書きすることで、既存アプリが取り込む記録は常に1項目1行になる。
+ * @param {string} date 対象日
+ * @param {string} target 対象
+ * @param {string} itemName 項目名
+ * @param {string} value 人の回答
+ * @return {boolean} 上書きしたらtrue
+ */
+function supersedeEstimate_(date, target, itemName, value) {
+  var rows = findRows(SHEETS.LOG_IMPORT, function (r) {
+    return toDateStr_(r['発生日']) === date
+      && String(r['対象']) === String(target)
+      && String(r['項目名']) === String(itemName)
+      && String(r['対象種別']) === 'support'
+      && String(r['確度']) === CERTAINTY.ESTIMATED;
+  });
+  if (!rows.length) return false;
+
+  updateRow(SHEETS.LOG_IMPORT, rows[0]._row, {
     '値': value,
     '取込元': 'ai-uribo',
-    '取込日時': nowStr_()
+    '取込日時': nowStr_(),
+    '確度': CERTAINTY.FIXED
   });
+  return true;
 }
 
 /**

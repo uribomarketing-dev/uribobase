@@ -169,6 +169,12 @@ function weeklyDigest() {
         + Math.round(wrong * 100 / feedback.length) + '%）');
     }
     if (stale.length) lines.push('※8時間以上返事待ちの項目：' + stale.length + '件');
+
+    // 学習の進み具合（＝どれだけ質問が減ったか）を毎週示す
+    var saved = safely_(proc, function () { return countAutoConfirmed_(from, to); }, 0);
+    if (saved) lines.push('学習済みのため聞かずに済んだ件数：' + saved + '件');
+    lines.push('');
+    safely_(proc, function () { learnSummaryLines_().forEach(function (l) { lines.push(l); }); });
     lines.push('');
     if (open.length) {
       lines.push('▼未完了の一覧（最大15件）');
@@ -197,7 +203,8 @@ function weeklyDigest() {
     writeLog(proc, '週次集計',
       JSON.stringify({ from: from, to: to, 検出: gapsInRange.length, 完了: done.length,
         未完了: open.length, 質問: askCount, わからない: unknowns.length,
-        わからない率: unknownRate, 自動充足: autoFilled, 自動充足率: autoRate, 要精査: needsReview }));
+        わからない率: unknownRate, 自動充足: autoFilled, 自動充足率: autoRate, 要精査: needsReview,
+        学習で省いた質問: saved }));
     logInfo(proc, '送信 ' + n + '名');
     return '未完了' + open.length + '件 / 送信' + n + '名';
    } catch (e) {

@@ -97,7 +97,10 @@ function ruleR02_(targetDate, check) {
     var target = String(r['対象']);
     var name = String(r['項目名']);
     if (String(r['対象種別']) === 'support') {
-      have[target + '\t' + name] = true;
+      // 確度=推定 の行は「埋めてはあるが、まだ人に確かめていない」もの。
+      // 記録としては残したまま、質問は出す（learn.gs が実績を貯め、当たるようになったら
+      // 確度=自動確定 に変わって、この行も「聞かなくてよい」側に入る）。
+      if (String(r['確度']) !== CERTAINTY.ESTIMATED) have[target + '\t' + name] = true;
       // 在否確認が外泊・入院・帰省なら、その日はその利用者の全項目を判定除外
       if (name === '在否確認' && /外泊|入院|帰省|不在/.test(String(r['値']))) absent[target] = true;
       if (name === '不在') absent[target] = true;

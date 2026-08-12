@@ -78,6 +78,14 @@ function exportDiagnostics(brief) {
       + '補完台帳(S7): ' + findRows(SHEETS.FILL).length + '件');
   });
 
+  // 3b. 学習の進み具合（質問がどれだけ減っているか）
+  safely_('exportDiagnostics', function () {
+    lines.push('');
+    lines.push('【学習】');
+    lines.push('学習: ' + (isTrue_(getSetting('learning_enabled', 'TRUE')) ? 'ON' : 'OFF'));
+    learnSummaryLines_().forEach(function (l) { lines.push(l); });
+  });
+
   // 4. 最後の実行結果
   safely_('exportDiagnostics', function () {
     lines.push('');

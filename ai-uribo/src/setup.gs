@@ -51,7 +51,8 @@ function initSheets() {
 function ensureSheet_(book, def, created, skipped) {
   var sh = book.getSheetByName(def.name);
   if (sh) {
-    skipped.push(def.name);
+    var added = addMissingHeaders_(sh, def);
+    skipped.push(def.name + (added.length ? '（列を追加: ' + added.join('・') + '）' : ''));
     return sh;
   }
   sh = book.insertSheet(def.name);
@@ -65,6 +66,33 @@ function ensureSheet_(book, def, created, skipped) {
   created.push(def.name);
   invalidateCache_(def.name);
   return sh;
+}
+
+/**
+ * すでにあるシートに、定義には有るのに実物に無い列を末尾へ足す。
+ *
+ * バージョンアップで列が増えたとき、藤原様が台帳を作り直さなくて済むようにするための処理。
+ * 既存の列は並べ替えも改名もしない（既存データを壊さないため、足すだけ）。
+ * @param {Sheet} sh シート
+ * @param {{name:string, headers:Array.<string>, note:string}} def シート定義
+ * @return {Array.<string>} 追加した列名
+ */
+function addMissingHeaders_(sh, def) {
+  var width = Math.max(sh.getLastColumn(), 1);
+  var current = sh.getRange(1, 1, 1, width).getValues()[0].map(function (v) { return String(v).trim(); });
+  var missing = def.headers.filter(function (h) { return current.indexOf(h) < 0; });
+  if (!missing.length) return [];
+
+  var start = current.length + 1;
+  if (sh.getMaxColumns() < current.length + missing.length) {
+    sh.insertColumnsAfter(sh.getMaxColumns(), current.length + missing.length - sh.getMaxColumns());
+  }
+  sh.getRange(1, start, 1, missing.length).setValues([missing])
+    .setFontWeight('bold').setBackground('#EFEFEF');
+  sh.getRange(1, 1).setNote(def.note);
+  invalidateCache_(def.name);
+  logInfo('addMissingHeaders_', def.name + ' に列を追加: ' + missing.join('・'));
+  return missing;
 }
 
 /**

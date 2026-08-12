@@ -179,7 +179,7 @@ function mockFolder(name) {
 function iter(arr) { let i = 0; return { hasNext: () => i < arr.length, next: () => arr[i++] }; }
 
 vm.createContext(sandbox);
-['config', 'db', 'log', 'notify', 'setup', 'autofill', 'detect', 'ask', 'batch', 'webhook', 'backup', 'diagnose', 'switchbot'].forEach(f => {
+['config', 'db', 'log', 'notify', 'setup', 'learn', 'autofill', 'detect', 'ask', 'batch', 'webhook', 'backup', 'diagnose', 'switchbot'].forEach(f => {
   vm.runInContext(fs.readFileSync(path.join(SRC, f + '.gs'), 'utf8'), sandbox, { filename: f + '.gs' });
 });
 
@@ -195,13 +195,13 @@ const isTrueLike = v => v === true || String(v).toLowerCase() === 'true';
 
 console.log('\n=== T1 台帳生成 ===');
 run('initSheets()');
-check('12シート生成', book.sheets.length === 12, book.sheets.map(s => s.name));
+check('13シート生成', book.sheets.length === 13, book.sheets.map(s => s.name));
 check('S1に4名', rows('STAFF').length === 4);
 check('S3のCHK001が有効', run(`String(checkById_('CHK001')['有効'])`) === 'true');
 check('S3のCHK101は無効', run(`String(checkById_('CHK101')['有効'])`) === 'false');
 check('S8にmorning_batch_hour=10', run(`getSetting('morning_batch_hour')`) === '10');
 run('initSheets()');
-check('再実行しても増えない（冪等）', rows('STAFF').length === 4 && book.sheets.length === 12);
+check('再実行しても増えない（冪等）', rows('STAFF').length === 4 && book.sheets.length === 13);
 
 console.log('\n=== T2 登録コードによる本人確認と紐付け ===');
 props.LINE_CHANNEL_TOKEN = 'dummy-token';
@@ -304,14 +304,14 @@ check('そこから服薬確認も推定で埋める（隙間を残さない）'
 check('推定で埋めたものは要精査の印が付く',
   rows('FILL').some(f => String(f.項目名) === '服薬確認' && isTrueLike(f.要精査)), rows('FILL').slice(-3));
 const d2 = run(`detectGaps(addDays_(todayStr_(),-1),['R02'])`);
-check('推定で埋まった服薬確認はもう質問されない', !d2.some(g => g.check_id === 'CHK106'), d2);
+// 推定は「埋めてあるが、まだ確かめていない」状態。記録は残しつつ人にも確認する（learn.gs）
+check('推定で埋めても、確かめるまでは質問が出る', d2.some(g => g.check_id === 'CHK106'), d2);
 check('データが無い在否確認は質問として残る', d2.some(g => g.check_id === 'CHK101'), d2);
 pushes.length = 0;
 console.log('  morningBatch（支援記録あり） → ' + run('morningBatch()'));
 check('Stage1は藤原・服部の2名にまとめて送信', pushes.length === 2 && pushes.map(p => p.to).sort().join() === 'U_FUJI,U_HATT', pushes.map(p => p.to));
 check('在否確認の不足がS5に登録', rows('GAP').some(g => g.check_id === 'CHK101' && g.対象 === 'TEST01'));
-// 服薬確認は推定で埋まって質問が消えるため、同じ利用者・同じ日の別の不足を使って
-// 「参照ログが質問に添えられるか」だけを確認する
+// 同じ利用者・同じ日の不足を使って「参照ログが質問に添えられるか」を確認する
 const medGap = rows('GAP').find(g => g.対象 === 'TEST01');
 const medMsgs = run(`buildQuestion_({task_id:'TSKX'}, findRow(SHEETS.GAP,{'gap_id':'${medGap.gap_id}'}), checkById_('CHK106'), 0)`);
 check('服薬確認の質問に開放ログが判断材料として添えられる',
@@ -512,6 +512,99 @@ run(`(function(){var r=findRow(SHEETS.SETTING,{'キー':'test_mode'});updateRow(
 pushes.length = 0;
 run('weeklyDigest()');
 check('テストモードを切ると実際に送る', pushes.length > 0, pushes.length);
+
+console.log('\n=== T11 学習（当たる自動データは質問しなくなる） ===');
+// 在否自動をONにした利用者を用意し、開閉センサーの推定と人の回答を突き合わせていく
+run(`(function(){
+  appendRow(SHEETS.USER,{user_code:'TEST03',拠点:'清水',自動ログ対応:false,服薬自動:false,在否自動:true,日中自動:false,有効:true});
+})()`);
+
+// 1日分：センサーの推定で埋まるが、確かめていないので質問も出る
+const learnDay = d => run(`(function(){
+  var day = addDays_(todayStr_(), ${-1});
+  return day;
+})()`);
+const seedDoor = date => run(`appendRow(SHEETS.LOG_IMPORT,{log_id:nextSeqId_(SHEETS.LOG_IMPORT,'log_id','LOG',6),発生日:'${date}',対象種別:'raw_door',対象:'TEST03',項目名:'玄関',値:'開',取込元:'test',取込日時:nowStr_()})`);
+const day1 = run(`addDays_(todayStr_(),-3)`);
+seedDoor(day1);
+run(`runAutoFill('${day1}')`);
+check('推定で埋めた記録には確度「推定」が付く',
+  rows('LOG_IMPORT').some(l => l.対象 === 'TEST03' && l.項目名 === '在否確認' && l.確度 === '推定'),
+  rows('LOG_IMPORT').filter(l => l.対象 === 'TEST03').map(l => l.項目名 + ':' + l.確度));
+check('AIが読んだ選択肢（推定回答）も残る',
+  rows('LOG_IMPORT').some(l => l.対象 === 'TEST03' && l.項目名 === '在否確認' && l.推定回答 === '在宅'));
+check('確かめていないので在否確認の質問は出る',
+  run(`detectGaps('${day1}',['R02'])`).some(g => g.check_id === 'CHK101' && g.対象 === 'TEST03'));
+
+// 人が答えると、推定行が回答で上書きされ、実績が1件貯まる
+const answerAs = (date, choice) => run(`(function(){
+  var gaps = detectGaps('${date}',['R02']).filter(function(g){return g.check_id==='CHK101'&&g.対象==='TEST03';});
+  registerGaps(gaps);
+  var gap = findRows(SHEETS.GAP,function(r){return toDateStr_(r['対象日'])==='${date}'&&r['check_id']==='CHK101'&&r['対象']==='TEST03';})[0];
+  var staff = findRow(SHEETS.STAFF,{'staff_id':'STF001'});
+  recordFill_(gap, checkById_('CHK101'), '${choice}', staff);
+  return gap.gap_id;
+})()`);
+answerAs(day1, '在宅');
+check('人の回答で推定行が上書きされ、同じ項目が2行にならない',
+  rows('LOG_IMPORT').filter(l => l.対象 === 'TEST03' && l.項目名 === '在否確認' && l.発生日 === day1).length === 1);
+check('上書き後の確度は「確定」',
+  rows('LOG_IMPORT').some(l => l.対象 === 'TEST03' && l.項目名 === '在否確認' && l.発生日 === day1 && l.確度 === '確定'));
+check('S13学習ログに一致が1件貯まる',
+  rows('LEARN').some(r => r.学習キー === 'door_sensor/在否確認' && Number(r.一致) === 1 && r.段階 === '確認中'),
+  rows('LEARN'));
+check('確かめた推定は「精査待ち」の一覧から外れる',
+  rows('FILL').some(f => f.対象 === 'TEST03' && f.項目名 === '在否確認' && f.精査結果 === '一致'),
+  rows('FILL').filter(f => f.対象 === 'TEST03').map(f => f.項目名 + ':' + f.精査結果));
+
+// 実績が規定回数そろうと自動確定に昇格する（＝もう聞かない）
+run(`(function(){for(var i=0;i<7;i++){learnObserve_('door_sensor','在否確認',true);}})()`);
+check('実績がそろうと「自動確定」に昇格する',
+  run(`learnStage_('door_sensor','在否確認')`) === '自動確定',
+  rows('LEARN').filter(r => r.学習キー === 'door_sensor/在否確認'));
+const day2 = run(`addDays_(todayStr_(),-4)`);
+seedDoor(day2);
+run(`runAutoFill('${day2}')`);
+check('昇格後は確度「自動確定」で埋まる',
+  rows('LOG_IMPORT').some(l => l.対象 === 'TEST03' && l.項目名 === '在否確認' && l.発生日 === day2 && l.確度 === '自動確定'));
+check('昇格後は在否確認の質問が出なくなる',
+  !run(`detectGaps('${day2}',['R02'])`).some(g => g.check_id === 'CHK101' && g.対象 === 'TEST03'));
+check('S7の情報源に「学習済み」と残り、後から説明できる',
+  rows('FILL').some(f => f.対象 === 'TEST03' && f.項目名 === '在否確認' && String(f.情報源).indexOf('学習済み') > 0));
+
+// 当たらなくなったら自分で聞き直しに戻る（センサーの位置ずれ・故障に気づくため）
+run(`(function(){for(var i=0;i<4;i++){learnObserve_('door_sensor','在否確認',false);}})()`);
+check('外れが続くと「要見直し」に降格する',
+  run(`learnStage_('door_sensor','在否確認')`) === '要見直し',
+  rows('LEARN').filter(r => r.学習キー === 'door_sensor/在否確認'));
+const day3 = run(`addDays_(todayStr_(),-5)`);
+seedDoor(day3);
+run(`runAutoFill('${day3}')`);
+check('降格後は質問が復活する',
+  run(`detectGaps('${day3}',['R02'])`).some(g => g.check_id === 'CHK101' && g.対象 === 'TEST03'));
+
+// 「わからない」は当たり外れの材料にしない
+const learnBefore = rows('LEARN').find(r => r.学習キー === 'door_sensor/在否確認');
+const totalBefore = Number(learnBefore.確認回数);
+answerAs(day3, 'わからない');
+check('「わからない」は精度の材料にしない',
+  Number(rows('LEARN').find(r => r.学習キー === 'door_sensor/在否確認').確認回数) === totalBefore);
+
+// 機械には決めようがないもの（服薬の声かけ）は、いつまでも人に聞く
+check('推定回答を持たない推定は学習対象にならない',
+  !rows('LEARN').some(r => String(r.学習キー).indexOf('服薬確認') >= 0), rows('LEARN').map(r => r.学習キー));
+
+// 社員は「精度」コマンドで学習の状況を確認できる
+replies.length = 0;
+post([{ type: 'message', webhookEventId: 'e90', source: { userId: 'U_FUJI' }, message: { type: 'text', text: '精度' }, replyToken: 'r90' }]);
+check('「精度」コマンドで学習状況を返す',
+  JSON.stringify(replies[0] || '').indexOf('自動データの精度') > 0, JSON.stringify(replies));
+check('一言記述の待ちが残っていてもコマンドは記録に混ざらない',
+  !rows('TASK').some(t => String(t.回答).indexOf('精度') >= 0),
+  rows('TASK').filter(t => String(t.回答).indexOf('精度') >= 0).map(t => t.task_id + ':' + t.回答));
+replies.length = 0;
+post([{ type: 'message', webhookEventId: 'e91', source: { userId: 'U_NIGHT' }, message: { type: 'text', text: '精度' }, replyToken: 'r91' }]);
+check('夜勤は精度コマンドを使えない', JSON.stringify(replies[0] || '').indexOf('社員のみ') > 0, replies[0]);
 
 console.log('\n=== T7c 深夜帯のキュー保存と朝の送信 ===');
 const setQuiet = (s, e) => run(`(function(){

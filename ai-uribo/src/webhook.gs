@@ -427,6 +427,14 @@ function onTextBody_(staff, userId, text, replyToken, proc) {
         }
         replyRaw_(replyToken, [msgText_(buildReviewText_())]);
         return;
+      case '精度':
+      case 'せいど':
+        if (!isOfficeStaff_(staff)) {
+          replyRaw_(replyToken, [msgText_('このコマンドは社員のみ実行できます。')]);
+          return;
+        }
+        replyRaw_(replyToken, [msgText_(learnSummaryLines_().join('\n'))]);
+        return;
       case '診断':
         if (!isOfficeStaff_(staff)) {
           replyRaw_(replyToken, [msgText_('このコマンドは社員のみ実行できます。')]);
@@ -476,6 +484,7 @@ var HELP_TEXT_ = 'AI Uriboの使い方\n'
   + '・「ヘルプ」…このメッセージ\n'
   + '・「診断」…（社員のみ）不具合調査用の情報を返します\n'
   + '・「精査」…（社員のみ）データから推定して埋めた記録の一覧を返します\n'
+  + '・「精度」…（社員のみ）自動データがどれくらい当たっているかを返します\n'
   + '・「まとめ」…（社員のみ）SwitchBotのAIまとめを貼り付けると記録に取り込みます\n'
   + '答えられないときは無理をせず「わからない」で大丈夫です。社員が引き取ります。';
 
@@ -567,13 +576,15 @@ function saveSummary_(staff, text, replyToken) {
  * @return {string} 本文
  */
 function buildReviewText_() {
-  var rows = findRows(SHEETS.FILL, function (r) { return isTrue_(r['要精査']); })
+  var rows = findRows(SHEETS.FILL, function (r) {
+    return isTrue_(r['要精査']) && !String(r['精査結果'] || '').trim();
+  })
     .sort(function (a, b) {
       return toDateTimeStr_(b['作成日時']).localeCompare(toDateTimeStr_(a['作成日時']));
     });
-  if (!rows.length) return '推定で埋めた記録はありません。';
+  if (!rows.length) return 'まだ確かめていない推定の記録はありません。';
 
-  var lines = ['【推定で埋めた記録】' + rows.length + '件'];
+  var lines = ['【推定で埋めた記録（未確認）】' + rows.length + '件'];
   rows.slice(0, 10).forEach(function (r) {
     lines.push('・' + toDateStr_(r['対象日']) + ' ' + displayName_(String(r['対象']))
       + ' 「' + r['項目名'] + '」\n　→ ' + truncate_(String(r['値']), 60));
@@ -581,6 +592,7 @@ function buildReviewText_() {
   if (rows.length > 10) lines.push('…ほか' + (rows.length - 10) + '件');
   lines.push('');
   lines.push('内容が違っていれば、台帳のS7補完台帳で値を直し、要精査列をFALSEにしてください。');
+  lines.push('※同じ項目の質問に答えていただくと、この一覧からは自動で消え、AIの精度の実績になります。');
   return lines.join('\n');
 }
 
