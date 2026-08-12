@@ -310,6 +310,14 @@ function onPostback_(userId, data, replyToken) {
         handleAnswer_(staff, parts[1], parts.slice(2).join('|'), replyToken);
         return;
       }
+      if (parts[0] === 'fix') {
+        askCorrection_(staff, parts[1], replyToken);
+        return;
+      }
+      if (parts[0] === 'refix') {
+        applyCorrection_(staff, parts[1], parts.slice(2).join('|'), replyToken);
+        return;
+      }
       if (parts[0] === 'alert') {
         handleAlertFeedback_(staff, parts[1], parts.slice(2).join('|'), replyToken);
         return;
@@ -440,6 +448,9 @@ function onTextBody_(staff, userId, text, replyToken, proc) {
         replyRaw_(replyToken, [msgText_('SwitchBotの「AIまとめ」の本文を、そのまま貼り付けて送ってください。\n'
           + '先頭に日付（例：8/11）を書くとその日の記録になります。書かなければ昨日として扱います。')]);
         return;
+      case '訂正':
+        offerCorrection_(staff, replyToken);
+        return;
       case 'シフト':
         if (!isOfficeStaff_(staff)) {
           replyRaw_(replyToken, [msgText_('このコマンドは社員のみ実行できます。')]);
@@ -511,6 +522,7 @@ var HELP_TEXT_ = 'AI Uriboの使い方\n'
   + '・届いた質問はボタンを押すだけでOKです\n'
   + '・「未実施だった」「わからない」を選んだときだけ、一言だけ理由を送ってください（不要なら「なし」）\n'
   + '・「状況」…今の未完了件数を確認できます\n'
+  + '・「訂正」…押し間違えたときに、直近の回答を選んで直せます（前の回答も履歴に残ります）\n'
   + '・「報告」…事故・体調急変などをその場で報告できます\n'
   + '・「ヘルプ」…このメッセージ\n'
   + '・「診断」…（社員のみ）不具合調査用の情報を返します\n'

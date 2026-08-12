@@ -195,7 +195,7 @@ function mockFolder(name) {
 function iter(arr) { let i = 0; return { hasNext: () => i < arr.length, next: () => arr[i++] }; }
 
 vm.createContext(sandbox);
-['config', 'db', 'log', 'notify', 'setup', 'learn', 'autofill', 'detect', 'ask', 'batch', 'webhook', 'backup', 'diagnose', 'switchbot', 'selfcheck', 'users', 'consistency', 'api', 'monthly', 'shift'].forEach(f => {
+['config', 'db', 'log', 'notify', 'setup', 'learn', 'autofill', 'detect', 'ask', 'batch', 'webhook', 'backup', 'diagnose', 'switchbot', 'selfcheck', 'users', 'consistency', 'correct', 'api', 'monthly', 'shift'].forEach(f => {
   vm.runInContext(fs.readFileSync(path.join(SRC, f + '.gs'), 'utf8'), sandbox, { filename: f + '.gs' });
 });
 
@@ -1119,6 +1119,74 @@ check('自己点検が処理の遅れに気づいて知らせる',
   JSON.stringify(pushes).indexOf('時間内に終わらず') > 0, JSON.stringify(pushes).substring(0, 300));
 check('実行にかかった秒数が実行ログに残る（遅くなってきたら分かる）',
   String(run('morningBatch()')).indexOf('秒') > 0);
+
+console.log('\n=== T21 回答の訂正（押し間違いを本人が直せる） ===');
+// 訂正できる回答がないときは、そう伝える
+run(`(function(){
+  findRows(SHEETS.TASK,function(r){return String(r['送信先staff_id'])==='STF900';})
+    .forEach(function(t){updateRow(SHEETS.TASK,t._row,{'回答日時':''});});
+})()`);
+replies.length = 0;
+post([{ type: 'message', webhookEventId: 'ec1', source: { userId: 'U_NIGHT' }, message: { type: 'text', text: '訂正' }, replyToken: 'rc1' }]);
+check('直せる回答が無ければそう伝える',
+  JSON.stringify(replies[0] || '').indexOf('直せる回答はありません') > 0, replies[0]);
+
+// 答えた直後なら、本人が選び直せる
+const fixGapId = run(`(function(){
+  appendRow(SHEETS.GAP,{gap_id:'GAP-FIX-1',対象日:addDays_(todayStr_(),-1),check_id:'CHK101',対象:'TEST01',
+    状態:'完了',検出日時:nowStr_(),一次確認先staff_id:'STF001',完了日時:nowStr_()});
+  appendRow(SHEETS.TASK,{task_id:'TSK-FIX-1',gap_id:'GAP-FIX-1',送信先staff_id:'STF001',送信日時:nowStr_(),
+    回答:'在宅',回答日時:nowStr_(),回答方法:'ボタン',送信本文:'',送信状態:'送信済',再送回数:0,
+    追記待ち:false,セットid:'',並び順:1,retry_key:'',作成日時:nowStr_()});
+  appendRow(SHEETS.FILL,{fill_id:nextSeqId_(SHEETS.FILL,'fill_id','FIL',6),対象日:addDays_(todayStr_(),-1),
+    対象:'TEST01',項目名:'在否確認',値:'在宅',記入者staff_id:'STF001',取込済フラグ:true,作成日時:nowStr_(),
+    gap_id:'GAP-FIX-1',情報源:'支援担当者の記録',要精査:false,精査結果:''});
+  appendRow(SHEETS.LOG_IMPORT,{log_id:nextSeqId_(SHEETS.LOG_IMPORT,'log_id','LOG',6),
+    発生日:addDays_(todayStr_(),-1),対象種別:'support',対象:'TEST01',項目名:'在否確認',値:'在宅',
+    取込元:'ai-uribo',取込日時:nowStr_(),確度:'確定',推定回答:''});
+  return 'GAP-FIX-1';
+})()`);
+replies.length = 0;
+post([{ type: 'message', webhookEventId: 'ec2', source: { userId: 'U_FUJI' }, message: { type: 'text', text: '訂正' }, replyToken: 'rc2' }]);
+check('直近に答えた項目が選べる',
+  JSON.stringify(replies[0] || '').indexOf('fix|TSK-FIX-1') > 0, JSON.stringify(replies[0] || '').substring(0, 300));
+replies.length = 0;
+post([{ type: 'postback', webhookEventId: 'ec3', source: { userId: 'U_FUJI' }, postback: { data: 'fix|TSK-FIX-1' }, replyToken: 'rc3' }]);
+check('いまの記録内容を示して選択肢を出し直す',
+  JSON.stringify(replies[0] || '').indexOf('今は「在宅」で記録されています') > 0
+    && JSON.stringify(replies[0] || '').indexOf('refix|TSK-FIX-1|外泊・帰省') > 0, replies[0]);
+
+// 他人の回答は直せない
+replies.length = 0;
+post([{ type: 'postback', webhookEventId: 'ec4', source: { userId: 'U_NIGHT' }, postback: { data: 'fix|TSK-FIX-1' }, replyToken: 'rc4' }]);
+check('他人の回答は直せない',
+  JSON.stringify(replies[0] || '').indexOf('ご自身のものではない') > 0, replies[0]);
+
+replies.length = 0;
+post([{ type: 'postback', webhookEventId: 'ec5', source: { userId: 'U_FUJI' }, postback: { data: 'refix|TSK-FIX-1|外泊・帰省' }, replyToken: 'rc5' }]);
+check('訂正できたことを本人に返す',
+  JSON.stringify(replies[0] || '').indexOf('外泊・帰省」に直しました') > 0, replies[0]);
+check('元の回答は履歴として残る（消さない）',
+  rows('TASK').some(t => t.task_id === 'TSK-FIX-1' && String(t.回答方法).indexOf('訂正（前: 在宅）') === 0),
+  rows('TASK').filter(t => t.task_id === 'TSK-FIX-1'));
+check('補完台帳の元の記録に「訂正前」が付く',
+  rows('FILL').some(f => f.gap_id === 'GAP-FIX-1' && f.精査結果 === '訂正前'));
+check('訂正後の記録が新しい行として足される',
+  rows('FILL').some(f => f.gap_id === 'GAP-FIX-1' && f.精査結果 === '訂正後'
+    && String(f.値) === '外泊・帰省' && String(f.情報源).indexOf('訂正') > 0),
+  rows('FILL').filter(f => f.gap_id === 'GAP-FIX-1'));
+check('訂正後の行は未取込なので既存アプリに渡る',
+  JSON.parse(run(`doGet(${JSON.stringify({ parameter: { k: 'k123', mode: 'fills' } })})`).text)
+    .items.some(i => i.精査結果 === '訂正後'));
+check('実績ログも新しい内容にそろう（1項目1行を保つ）',
+  rows('LOG_IMPORT').filter(l => l.項目名 === '在否確認' && l.対象 === 'TEST01'
+    && toStr(l.発生日) === run(`addDays_(todayStr_(),-1)`)).every(l => String(l.値) === '外泊・帰省'));
+check('いつ誰が何をどう直したかが実行ログに残る',
+  rows('RUN_LOG').some(r => String(r.結果) === '訂正' && String(r.詳細).indexOf('在宅') > 0));
+replies.length = 0;
+post([{ type: 'postback', webhookEventId: 'ec6', source: { userId: 'U_FUJI' }, postback: { data: 'refix|TSK-FIX-1|外泊・帰省' }, replyToken: 'rc6' }]);
+check('同じ内容に直そうとしたら何もしない',
+  JSON.stringify(replies[0] || '').indexOf('いまと同じ内容') > 0, replies[0]);
 
 console.log('\n=== T20 拠点名の書き方のゆれ ===');
 run(`(function(){
