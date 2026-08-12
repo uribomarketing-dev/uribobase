@@ -881,6 +881,15 @@ check('済みを付けたものは次から渡されない',
   apiGet({ k: 'k123', mode: 'fills' }).items.every(i => someIds.indexOf(i.fill_id) < 0));
 check('済みを付けそこねた分は次も渡される（取りこぼしが起きない）',
   apiGet({ k: 'k123', mode: 'fills' }).count === apiFillsRes.count - someIds.length);
+// 書き込めなかったときに「0件成功」と返すと、渡せていない記録を渡した扱いにしてしまう
+sandbox.__lockBusy = true;
+const busyMark = JSON.parse(run(`doPost(${JSON.stringify({
+  parameter: { k: 'k123' },
+  postData: { contents: JSON.stringify({ action: 'markImported', fill_ids: ['FIL000001'] }) }
+})})`).text);
+sandbox.__lockBusy = false;
+check('書き込めなかったときは成功と返さない（やり直せるように）',
+  busyMark.ok === false && busyMark.error === 'busy', busyMark);
 const usersApi = apiGet({ k: 'k123', mode: 'users' });
 check('氏名の対応表は別の呼び出しでだけ渡す',
   usersApi.ok === true && usersApi.items.some(u => u.氏名 === '山田テスト'), usersApi);

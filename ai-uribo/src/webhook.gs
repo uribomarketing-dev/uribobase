@@ -43,8 +43,13 @@ function doPost(e) {
 
     // 既存アプリからの「取り込み済み」通知
     if (!body.events && String(body.action || '') === 'markImported') {
-      var marked = safely_(proc, function () { return markImported_(body); }, 0);
-      return ContentService.createTextOutput(JSON.stringify({ ok: true, marked: marked }))
+      var marked = safely_(proc, function () { return markImported_(body); }, -1);
+      // 書き込めなかったときは ok:false を返し、既存アプリにやり直してもらう
+      // （0件成功と同じ返事にすると、渡せていない記録を渡した扱いにしてしまう）
+      var payload = marked < 0
+        ? { ok: false, error: 'busy', marked: 0 }
+        : { ok: true, marked: marked };
+      return ContentService.createTextOutput(JSON.stringify(payload))
         .setMimeType(ContentService.MimeType.JSON);
     }
 

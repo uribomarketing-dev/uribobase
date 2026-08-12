@@ -150,8 +150,10 @@ function apiPing_() {
 
 /**
  * 取り込みが済んだ補完台帳に済みを付ける（POST）。
+ * 他の処理と重なって書き込めなかったときは -1 を返す。
+ * 0（対象なし）と混同すると、既存アプリが「済んだ」と誤解して同じ記録を二度と受け取れなくなる。
  * @param {Object} body リクエストボディ
- * @return {number} 済みを付けた件数
+ * @return {number} 済みを付けた件数。書き込めなかったときは -1
  */
 function markImported_(body) {
   var proc = 'markImported';
@@ -170,5 +172,8 @@ function markImported_(body) {
     });
     logInfo(proc, ids.length + '件の指定のうち ' + n + '件に取込済みを付けました');
     return n;
-  }, function () { return 0; });
+  }, function () {
+    logWarn(proc, '他の処理が実行中のため取込済みを付けられませんでした（呼び出し側でやり直してください）');
+    return -1;
+  });
 }

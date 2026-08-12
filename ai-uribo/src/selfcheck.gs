@@ -189,14 +189,19 @@ function checkDevices_(issues) {
   var devices = findRows(SHEETS.DEVICE, function (r) { return isTrue_(r['有効']); });
   if (!devices.length) return;
 
-  // 自動データの取込元は「switchbot-poll:<deviceId>」の形で入っているので、機器ごとに追える
+  // 自動データの取込元は「switchbot-poll:<deviceId>」の形で入っているので、機器ごとに追える。
+  // 部分一致だと別の機器のIDに含まれてしまうことがあるため、IDそのもので突き合わせる
   var since = addDays_(todayStr_(), -3);
-  var recent = findRows(SHEETS.LOG_IMPORT, function (r) {
+  var heard = {};
+  findRows(SHEETS.LOG_IMPORT, function (r) {
     return toDateStr_(r['発生日']) >= since && String(r['対象種別']).indexOf('raw_') === 0;
-  }).map(function (r) { return String(r['取込元']); }).join('\n');
+  }).forEach(function (r) {
+    var parts = String(r['取込元']).split(':');
+    if (parts.length > 1) heard[parts[parts.length - 1]] = true;
+  });
 
   var silent = devices.filter(function (d) {
-    return recent.indexOf(String(d['deviceId'])) < 0;
+    return !heard[String(d['deviceId'])];
   });
   // 全機器が黙っているときは、機器側ではなく連携そのものが止まっている可能性が高い
   if (silent.length && silent.length === devices.length) {
