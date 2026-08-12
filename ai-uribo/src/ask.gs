@@ -373,7 +373,8 @@ function recordFill_(gap, check, value, staff) {
     '取込済フラグ': false,
     '作成日時': nowStr_(),
     'gap_id': gapId,
-    '情報源': fillSourceOf_(gap, staff)
+    '情報源': fillSourceOf_(gap, staff),
+    '要精査': false
   });
 
   appendRow(SHEETS.LOG_IMPORT, {

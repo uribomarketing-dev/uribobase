@@ -137,6 +137,7 @@ function weeklyDigest() {
       return UNKNOWN_ANSWERS.indexOf(String(r['回答']).split('／')[0]) >= 0;
     });
     var autoFilled = safely_(proc, function () { return countAutoFilled_(from, to); }, 0);
+    var needsReview = safely_(proc, function () { return countNeedsReview_(from, to); }, 0);
 
     var askCount = findRows(SHEETS.TASK, function (r) {
       var d = toDateTimeStr_(r['送信日時']);
@@ -151,6 +152,10 @@ function weeklyDigest() {
     lines.push('検出' + gapsInRange.length + '件 / 完了' + done.length + '件 / 未完了' + open.length + '件');
     lines.push('質問した件数：' + askCount + '件（うち「わからない」' + unknowns.length + '件・' + unknownRate + '%）');
     lines.push('自動で埋まった件数：' + autoFilled + '件（自動充足率 ' + autoRate + '%）');
+    if (needsReview) {
+      lines.push('うち推定で埋めた「要精査」：' + needsReview + '件'
+        + '（LINEで「精査」と送るか、S7補完台帳の要精査列をご確認ください）');
+    }
     if (stale.length) lines.push('※8時間以上返事待ちの項目：' + stale.length + '件');
     lines.push('');
     if (open.length) {
@@ -180,7 +185,7 @@ function weeklyDigest() {
     writeLog(proc, '週次集計',
       JSON.stringify({ from: from, to: to, 検出: gapsInRange.length, 完了: done.length,
         未完了: open.length, 質問: askCount, わからない: unknowns.length,
-        わからない率: unknownRate, 自動充足: autoFilled, 自動充足率: autoRate }));
+        わからない率: unknownRate, 自動充足: autoFilled, 自動充足率: autoRate, 要精査: needsReview }));
     logInfo(proc, '送信 ' + n + '名');
     return '未完了' + open.length + '件 / 送信' + n + '名';
    } catch (e) {

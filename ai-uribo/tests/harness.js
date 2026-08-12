@@ -191,6 +191,7 @@ function check(label, cond, extra) {
   if (!cond) failures++;
 }
 const rows = sheet => run(`findRows(SHEETS.${sheet})`);
+const isTrueLike = v => v === true || String(v).toLowerCase() === 'true';
 
 console.log('\n=== T1 台帳生成 ===');
 run('initSheets()');
@@ -296,17 +297,22 @@ run(`(function(){
   appendRow(SHEETS.LOG_IMPORT,{log_id:'RAW1',発生日:addDays_(todayStr_(),-1),対象種別:'raw_switchbot',対象:'TEST01',項目名:'服薬',値:'OK',取込元:'switchbot',取込日時:nowStr_()});
 })()`);
 const autoRes = run(`runAutoFill(addDays_(todayStr_(),-1))`);
-check('SwitchBotログが「服薬ボックス開放」として記録される',
-  autoRes.filled === 1 && rows('LOG_IMPORT').some(l => String(l.項目名) === '服薬ボックス開放'), autoRes);
+check('SwitchBotログが開放の事実として記録される',
+  rows('LOG_IMPORT').some(l => String(l.項目名) === '服薬ボックス開放'), autoRes);
+check('そこから服薬確認も推定で埋める（隙間を残さない）',
+  autoRes.estimated === 1 && rows('LOG_IMPORT').some(l => String(l.項目名) === '服薬確認'), autoRes);
+check('推定で埋めたものは要精査の印が付く',
+  rows('FILL').some(f => String(f.項目名) === '服薬確認' && isTrueLike(f.要精査)), rows('FILL').slice(-3));
 const d2 = run(`detectGaps(addDays_(todayStr_(),-1),['R02'])`);
-check('服薬確認は自動で埋めず人に聞く（センサーは合図にすぎないため）',
-  d2.some(g => g.check_id === 'CHK106'), d2);
-check('在否確認も不足として残る', d2.some(g => g.check_id === 'CHK101'), d2);
+check('推定で埋まった服薬確認はもう質問されない', !d2.some(g => g.check_id === 'CHK106'), d2);
+check('データが無い在否確認は質問として残る', d2.some(g => g.check_id === 'CHK101'), d2);
 pushes.length = 0;
 console.log('  morningBatch（支援記録あり） → ' + run('morningBatch()'));
 check('Stage1は藤原・服部の2名にまとめて送信', pushes.length === 2 && pushes.map(p => p.to).sort().join() === 'U_FUJI,U_HATT', pushes.map(p => p.to));
 check('在否確認の不足がS5に登録', rows('GAP').some(g => g.check_id === 'CHK101' && g.対象 === 'TEST01'));
-const medGap = rows('GAP').find(g => g.check_id === 'CHK106' && g.対象 === 'TEST01');
+// 服薬確認は推定で埋まって質問が消えるため、同じ利用者・同じ日の別の不足を使って
+// 「参照ログが質問に添えられるか」だけを確認する
+const medGap = rows('GAP').find(g => g.対象 === 'TEST01');
 const medMsgs = run(`buildQuestion_({task_id:'TSKX'}, findRow(SHEETS.GAP,{'gap_id':'${medGap.gap_id}'}), checkById_('CHK106'), 0)`);
 check('服薬確認の質問に開放ログが判断材料として添えられる',
   JSON.stringify(medMsgs).indexOf('服薬ボックス開放：開放を検知') > 0, medMsgs);
@@ -487,7 +493,15 @@ check('代理入力は代理入力と分かる形で残る',
 check('センサー由来の値に出所を明記', rows('LOG_IMPORT').some(l => String(l.値).indexOf('自動記録') > 0),
   rows('LOG_IMPORT').filter(l => String(l.取込元).indexOf('switchbot') >= 0).map(l => l.値));
 
-// 9. 診断コマンド（不具合報告用）
+// 9. 「精査」コマンド：推定で埋めた記録を人が見て直せる
+replies.length = 0;
+post([{ type: 'message', webhookEventId: 'e36', source: { userId: 'U_FUJI' }, message: { type: 'text', text: '精査' }, replyToken: 'r36' }]);
+const reviewText = JSON.stringify(replies[0] || '');
+check('「精査」で推定して埋めた記録の一覧が返る',
+  reviewText.indexOf('推定で埋めた記録') > 0 && reviewText.indexOf('服薬確認') > 0, replies[0]);
+check('精査の直し方まで案内する', reviewText.indexOf('要精査列をFALSE') > 0);
+
+// 10. 診断コマンド（不具合報告用）
 replies.length = 0;
 post([{ type: 'message', webhookEventId: 'e34', source: { userId: 'U_FUJI' }, message: { type: 'text', text: '診断' }, replyToken: 'r34' }]);
 const diagText = JSON.stringify(replies[0] || '');
