@@ -1022,6 +1022,38 @@ check('新しい行は残る', rows('LOG_IMPORT').some(r => r.対象 === 'TEST03
 check('自動整理はバックアップの後に走る',
   String(run('dailyBackup()')).indexOf('のバックアップ完了') > 0);
 
+console.log('\n=== T16 実行時間の上限への備え ===');
+// GASは6分で強制終了され、その瞬間に何が終わって何が終わっていないのか分からなくなる。
+// 手前で自分から切り上げ、残りは翌日の実行がそのまま拾う
+run(`appendRow(SHEETS.GAP,{gap_id:'GAP-BUDGET-1',対象日:todayStr_(),check_id:'CHK001',対象:'STF001',
+  状態:'検出',検出日時:nowStr_(),一次確認先staff_id:'STF001',完了日時:''})`);
+run('startBatchClock_()');
+run('BATCH_TIME_BUDGET_MS = 0');
+check('時間切れと判定する', run('withinBatchBudget_()') === false);
+pushes.length = 0;
+run(`dispatchPendingGaps_(function(g){return String(g['gap_id'])==='GAP-BUDGET-1';},'【時間テスト】','budgetTest')`);
+check('時間切れなら送らずに次回へ回す', pushes.length === 0, pushes.length);
+check('回したことを警告として残す',
+  rows('RUN_LOG').some(r => String(r.結果) === '警告' && String(r.詳細).indexOf('次回に回しました') > 0));
+check('不足は消えないので翌日も残る',
+  rows('GAP').some(g => g.gap_id === 'GAP-BUDGET-1' && String(g.状態) !== '完了'));
+
+run('BATCH_TIME_BUDGET_MS = 240000');
+run('startBatchClock_()');
+check('余裕があれば止めない', run('withinBatchBudget_()') === true);
+pushes.length = 0;
+run(`dispatchPendingGaps_(function(g){return String(g['gap_id'])==='GAP-BUDGET-1';},'【時間テスト】','budgetTest')`);
+check('余裕が戻れば同じ不足をちゃんと送る', pushes.length > 0, pushes.length);
+
+// 自己点検が「間に合っていない」ことに気づく
+clearCache();
+pushes.length = 0;
+run('selfCheck()');
+check('自己点検が処理の遅れに気づいて知らせる',
+  JSON.stringify(pushes).indexOf('時間内に終わらず') > 0, JSON.stringify(pushes).substring(0, 300));
+check('実行にかかった秒数が実行ログに残る（遅くなってきたら分かる）',
+  String(run('morningBatch()')).indexOf('秒') > 0);
+
 run('installTriggers()');
 check('トリガーを登録（SwitchBot設定時は8本）',
   sandbox.__triggers.length === 8 && sandbox.__triggers.indexOf('switchbotPoll') >= 0

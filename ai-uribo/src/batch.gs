@@ -16,6 +16,42 @@
 var BATCH_LOCK_WAIT_MS = 300000;
 
 /**
+ * 1回のバッチで使ってよい時間（ミリ秒）。
+ * GASの実行は6分で強制終了され、その瞬間に何が終わって何が終わっていないのか分からなくなる。
+ * 手前で自分から切り上げ、残りは次の実行に回す（毎日動くので、翌日には必ず追いつく）。
+ * @type {number}
+ */
+var BATCH_TIME_BUDGET_MS = 240000;
+
+/** いまのバッチが始まった時刻（ミリ秒） @type {number} */
+var BATCH_STARTED_AT_ = 0;
+
+/**
+ * バッチの時計を開始する。
+ * @return {void}
+ */
+function startBatchClock_() {
+  BATCH_STARTED_AT_ = new Date().getTime();
+}
+
+/**
+ * まだ時間に余裕があるか。
+ * @return {boolean} 余裕があればtrue
+ */
+function withinBatchBudget_() {
+  if (!BATCH_STARTED_AT_) return true;
+  return (new Date().getTime() - BATCH_STARTED_AT_) < BATCH_TIME_BUDGET_MS;
+}
+
+/**
+ * バッチ開始からの経過秒数。
+ * @return {number} 秒
+ */
+function batchElapsedSec_() {
+  return BATCH_STARTED_AT_ ? Math.round((new Date().getTime() - BATCH_STARTED_AT_) / 1000) : 0;
+}
+
+/**
  * 朝バッチ。前日分を自動充足したうえで不足を検出し、確認LINEを送る。
  * @return {string} 実行サマリ
  */
@@ -24,6 +60,7 @@ function morningBatch() {
   return withLock_(proc, BATCH_LOCK_WAIT_MS, function () {
     try {
       logStart(proc);
+      startBatchClock_();
       var targetDate = addDays_(todayStr_(), -1);
 
       safely_(proc, function () { flushQueue(); });
@@ -44,7 +81,8 @@ function morningBatch() {
       );
 
       var summary = '自動充足' + auto.filled + '件 / 食い違い' + bad.一覧.length + '件'
-        + ' / 新規検出' + gaps.length + '件 / 送信' + sentTotal + '件';
+        + ' / 新規検出' + gaps.length + '件 / 送信' + sentTotal + '件'
+        + ' / ' + batchElapsedSec_() + '秒';
       logInfo(proc, summary);
       return summary;
     } catch (e) {
@@ -64,6 +102,7 @@ function nightBatch() {
   return withLock_(proc, BATCH_LOCK_WAIT_MS, function () {
    try {
     logStart(proc);
+    startBatchClock_();
     var tomorrow = addDays_(todayStr_(), 1);
 
     // 明日の予定（R04）を検出して登録
@@ -121,6 +160,7 @@ function weeklyDigest() {
   return withLock_(proc, BATCH_LOCK_WAIT_MS, function () {
    try {
     logStart(proc);
+    startBatchClock_();
     var days = getSettingNum('digest_lookback_days', 7);
     var to = todayStr_();
     var from = addDays_(to, -days);
@@ -287,7 +327,11 @@ function dispatchPendingGaps_(gapFilter, title, proc) {
   });
 
   var sent = 0;
+  var skipped = 0;
   Object.keys(byStaff).forEach(function (staffId) {
+    // 時間切れで強制終了されると、送ったのか送っていないのか分からない状態が残る。
+    // 手前で自分から止めれば、残りは翌日の実行がそのまま拾う（不足は消えないため）
+    if (!withinBatchBudget_()) { skipped++; return; }
     safely_(proc, function () {
       var list = excludeAlreadyAsked_(byStaff[staffId], staffId);
       if (!list.length) return;
@@ -295,6 +339,10 @@ function dispatchPendingGaps_(gapFilter, title, proc) {
       if (r.sent) sent += r.count;
     });
   });
+  if (skipped) {
+    logWarn(proc, '実行時間が長くなったため' + skipped + '名分の送信を次回に回しました'
+      + '（経過' + batchElapsedSec_() + '秒）');
+  }
   return sent;
 }
 

@@ -44,6 +44,7 @@ function selfCheckBody_(proc) {
   safely_(proc, function () { checkDevices_(issues); });
   safely_(proc, function () { checkLearning_(issues); });
   safely_(proc, function () { checkSheetSize_(issues); });
+  safely_(proc, function () { checkSlowBatch_(issues); });
 
   var summary = '要対応' + issues.length + '件 / 自動修復' + fixed.length + '件';
   if (fixed.length) logInfo(proc, '自動修復: ' + fixed.join(' / '));
@@ -236,6 +237,25 @@ function checkSheetSize_(issues) {
     issues.push('台帳が大きくなっています：' + big.join('・')
       + '。自動整理が効いているかご確認ください（S8設定 archive_enabled）');
   }
+}
+
+/**
+ * バッチが時間切れ寸前になっていないかを見る。
+ * 件数が増えると、いつか6分の上限に当たる。当たる前に気づけるようにしておく。
+ * @param {Array.<string>} issues 要対応の配列（追記される）
+ * @return {void}
+ */
+function checkSlowBatch_(issues) {
+  var since = addDays_(todayStr_(), -3);
+  var slow = findRows(SHEETS.RUN_LOG, function (r) {
+    return String(r['結果']) === '警告'
+      && String(r['詳細']).indexOf('実行時間が長くなったため') >= 0
+      && toDateTimeStr_(r['日時']).substring(0, 10) >= since;
+  });
+  if (!slow.length) return;
+  issues.push('処理が時間内に終わらず、送信を次回に回した日があります（直近3日で' + slow.length + '回）。'
+    + '件数が増えています。S8設定の max_items_per_message を減らすか、'
+    + '対象の項目を絞ることをご検討ください');
 }
 
 /**
