@@ -326,7 +326,8 @@ function recordFill_(gap, check, value, staff) {
     '記入者staff_id': String(staff['staff_id']),
     '取込済フラグ': false,
     '作成日時': nowStr_(),
-    'gap_id': gapId
+    'gap_id': gapId,
+    '情報源': fillSourceOf_(gap, staff)
   });
 
   appendRow(SHEETS.LOG_IMPORT, {
@@ -339,6 +340,21 @@ function recordFill_(gap, check, value, staff) {
     '取込元': 'ai-uribo',
     '取込日時': nowStr_()
   });
+}
+
+/**
+ * その記録が「誰の情報か」を判定する。
+ * 監査では「いつ・誰が・誰に・何をしたか」が問われるため、
+ * 本人が答えたのか、支援した本人の記録か、社員の代理入力かを区別して残す。
+ * @param {Object} gap S5の行
+ * @param {Object} staff 回答したスタッフのS1行
+ * @return {string} 情報源
+ */
+function fillSourceOf_(gap, staff) {
+  if (String(gap['対象']) === String(staff['staff_id'])) return '本人回答';
+  var role = String(staff['役割']);
+  if (role === '社員' || role === '管理者') return '代理入力（' + role + '）';
+  return '支援担当者の記録（' + role + '）';
 }
 
 /**

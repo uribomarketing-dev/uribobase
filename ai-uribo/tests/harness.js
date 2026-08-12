@@ -437,7 +437,18 @@ replies.length = 0;
 post([{ type: 'message', webhookEventId: 'e33', source: { userId: 'U_NIGHT' }, message: { type: 'text', text: '状況' }, replyToken: 'r33' }]);
 check('夜勤には自分の担当分だけ表示', JSON.stringify(replies[0] || '').indexOf('あなたの未完了：0件') > 0, replies[0]);
 
-// 8. 診断コマンド（不具合報告用）
+// 8. 監査対応：記録の出所（情報源）が残る
+const fillsWithSource = rows('FILL').filter(f => String(f.情報源 || '').trim());
+check('補完台帳に情報源が残る', fillsWithSource.length > 0, rows('FILL').slice(0, 3));
+check('自動ログは自動と分かる形で残る',
+  rows('FILL').some(f => String(f.情報源).indexOf('自動ログ') === 0), fillsWithSource.map(f => f.情報源));
+check('代理入力は代理入力と分かる形で残る',
+  rows('FILL').some(f => String(f.情報源).indexOf('代理入力') === 0 || String(f.情報源).indexOf('本人回答') === 0),
+  fillsWithSource.map(f => f.情報源));
+check('センサー由来の値に出所を明記', rows('LOG_IMPORT').some(l => String(l.値).indexOf('自動記録') > 0),
+  rows('LOG_IMPORT').filter(l => String(l.取込元).indexOf('switchbot') >= 0).map(l => l.値));
+
+// 9. 診断コマンド（不具合報告用）
 replies.length = 0;
 post([{ type: 'message', webhookEventId: 'e34', source: { userId: 'U_FUJI' }, message: { type: 'text', text: '診断' }, replyToken: 'r34' }]);
 const diagText = JSON.stringify(replies[0] || '');
