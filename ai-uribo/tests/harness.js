@@ -179,7 +179,7 @@ function mockFolder(name) {
 function iter(arr) { let i = 0; return { hasNext: () => i < arr.length, next: () => arr[i++] }; }
 
 vm.createContext(sandbox);
-['config', 'db', 'log', 'notify', 'setup', 'autofill', 'detect', 'ask', 'batch', 'webhook', 'backup', 'diagnose'].forEach(f => {
+['config', 'db', 'log', 'notify', 'setup', 'autofill', 'detect', 'ask', 'batch', 'webhook', 'backup', 'diagnose', 'switchbot'].forEach(f => {
   vm.runInContext(fs.readFileSync(path.join(SRC, f + '.gs'), 'utf8'), sandbox, { filename: f + '.gs' });
 });
 
@@ -195,13 +195,13 @@ const isTrueLike = v => v === true || String(v).toLowerCase() === 'true';
 
 console.log('\n=== T1 台帳生成 ===');
 run('initSheets()');
-check('11シート生成', book.sheets.length === 11, book.sheets.map(s => s.name));
+check('12シート生成', book.sheets.length === 12, book.sheets.map(s => s.name));
 check('S1に4名', rows('STAFF').length === 4);
 check('S3のCHK001が有効', run(`String(checkById_('CHK001')['有効'])`) === 'true');
 check('S3のCHK101は無効', run(`String(checkById_('CHK101')['有効'])`) === 'false');
 check('S8にmorning_batch_hour=10', run(`getSetting('morning_batch_hour')`) === '10');
 run('initSheets()');
-check('再実行しても増えない（冪等）', rows('STAFF').length === 4 && book.sheets.length === 11);
+check('再実行しても増えない（冪等）', rows('STAFF').length === 4 && book.sheets.length === 12);
 
 console.log('\n=== T2 登録コードによる本人確認と紐付け ===');
 props.LINE_CHANNEL_TOKEN = 'dummy-token';
@@ -437,6 +437,67 @@ run(`(function(){
   ['CHK104','CHK105'].forEach(function(id){var c=checkById_(id);updateRow(SHEETS.CHECK,c._row,{'有効':false});});
 })()`);
 
+console.log('\n=== T7g SwitchBot本体との連携 ===');
+props.SWITCHBOT_TOKEN = 'sb-token';
+props.SWITCHBOT_SECRET = 'sb-secret';
+props.WEBAPP_URL = 'https://script.google.com/macros/s/XXX/exec?k=k123';
+
+// SwitchBot APIの応答を差し替える
+const realFetch = sandbox.UrlFetchApp.fetch;
+const sbCalls = [];
+sandbox.UrlFetchApp.fetch = (url, opts) => {
+  if (url.indexOf('switch-bot.com') < 0) return realFetch(url, opts);
+  sbCalls.push({ url, headers: opts.headers, payload: opts.payload });
+  let body = {};
+  if (url.indexOf('/devices/') >= 0 && url.indexOf('/status') >= 0) {
+    body = { deviceId: 'DEV1', deviceType: 'Meter', temperature: 28.4, humidity: 61, battery: 15 };
+  } else if (url.indexOf('/devices') >= 0) {
+    body = { deviceList: [
+      { deviceId: 'DEV1', deviceName: '玉里リビング温湿度計', deviceType: 'Meter' },
+      { deviceId: 'DEV2', deviceName: '服薬ボックス', deviceType: 'Contact Sensor' }
+    ], infraredRemoteList: [] };
+  } else if (url.indexOf('/webhook/setupWebhook') >= 0) {
+    body = {};
+  }
+  return { getResponseCode: () => 200, getContentText: () => JSON.stringify({ statusCode: 100, message: 'success', body }) };
+};
+
+check('署名ヘッダーを作れる', (() => { const h = run('switchbotHeaders_()'); return !!(h.Authorization && h.sign && h.t && h.nonce); })());
+console.log('  syncDevices → ' + run('switchbotSyncDevices()'));
+check('機器がS12に並ぶ', rows('DEVICE').length === 2, rows('DEVICE'));
+check('用途種別を名前から推測する',
+  rows('DEVICE').find(d => d.deviceName === '服薬ボックス').用途種別 === '服薬ボックス',
+  rows('DEVICE').map(d => d.用途種別));
+check('確認前は有効=FALSEで入る', rows('DEVICE').every(d => !isTrueLike(d.有効)));
+
+// 人が用途を確認して有効化する想定
+run(`(function(){
+  findRows(SHEETS.DEVICE).forEach(function(d){
+    updateRow(SHEETS.DEVICE, d._row, {'有効': true, '拠点':'玉里', 'deviceMac': d.deviceId === 'DEV2' ? 'C0:DE:B7:26:0F:48' : ''});
+  });
+})()`);
+console.log('  poll → ' + run('switchbotPoll()'));
+check('温湿度がS4に入る',
+  rows('LOG_IMPORT').some(l => String(l.対象種別) === 'raw_meter' && String(l.値).indexOf('室温28.4℃') >= 0),
+  rows('LOG_IMPORT').filter(l => String(l.取込元) === 'switchbot-poll').map(l => l.値));
+check('電池残量が少ない機器を警告する',
+  rows('RUN_LOG').some(r => String(r.結果) === '警告' && String(r.詳細).indexOf('電池残量') > 0));
+
+// SwitchBotのWebhook（服薬ボックスが開いた）
+const sbHook = { eventType: 'changeReport', eventVersion: '1', context: {
+  deviceType: 'WoContact', deviceMac: 'C0DEB7260F48', openState: 'open', detectionState: 'DETECTED', battery: 100 } };
+const hookRes = run(`doPost(${JSON.stringify({ parameter: { k: 'k123' }, postData: { contents: JSON.stringify(sbHook) } })})`);
+check('SwitchBotのWebhookを受け取る', String(hookRes.text) === 'OK:1', hookRes);
+check('機器マスタのMACで利用者に紐付く',
+  rows('LOG_IMPORT').some(l => String(l.取込元) === 'switchbot-webhook' && String(l.対象種別) === 'raw_switchbot'));
+const unknownHook = { eventType: 'changeReport', context: { deviceMac: 'FFFFFFFFFFFF', openState: 'open' } };
+const unknownRes = run(`doPost(${JSON.stringify({ parameter: { k: 'k123' }, postData: { contents: JSON.stringify(unknownHook) } })})`);
+check('未登録の機器からの通知は記録しない', String(unknownRes.text) === 'OK:0', unknownRes);
+console.log('  setupWebhook → ' + run('switchbotSetupWebhook()'));
+check('WebhookのURL登録を要求する',
+  sbCalls.some(c => c.url.indexOf('setupWebhook') > 0 && String(c.payload).indexOf('exec?k=') > 0));
+sandbox.UrlFetchApp.fetch = realFetch;
+
 console.log('\n=== T7c 深夜帯のキュー保存と朝の送信 ===');
 const setQuiet = (s, e) => run(`(function(){
   var a=findRow(SHEETS.SETTING,{'キー':'quiet_start_hour'});updateRow(SHEETS.SETTING,a._row,{'値':${s}});
@@ -577,7 +638,8 @@ post([{ type: 'message', webhookEventId: 'e35', source: { userId: 'U_NIGHT' }, m
 check('夜勤は診断コマンドを使えない', JSON.stringify(replies[0] || '').indexOf('社員のみ') > 0, replies[0]);
 
 run('installTriggers()');
-check('トリガー5件を登録', sandbox.__triggers.length === 5, sandbox.__triggers);
+check('トリガーを登録（SwitchBot設定時は6本）',
+  sandbox.__triggers.length === 6 && sandbox.__triggers.indexOf('switchbotPoll') >= 0, sandbox.__triggers);
 // 「WEBHOOK_SECRET未設定なので拒否した」は、fail-closeの検証で意図的に出したエラー
 const unexpectedErrors = rows('RUN_LOG').filter(r => r.結果 === 'エラー' &&
   String(r.詳細).indexOf('WEBHOOK_SECRET が未設定') < 0);

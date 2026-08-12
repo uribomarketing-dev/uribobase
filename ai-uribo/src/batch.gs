@@ -331,7 +331,7 @@ function formatMd_(dateStr) {
  */
 function installTriggers() {
   var proc = 'installTriggers';
-  var handlers = ['morningBatch', 'nightBatch', 'weeklyDigest', 'dailyBackup', 'flushQueue'];
+  var handlers = ['morningBatch', 'nightBatch', 'weeklyDigest', 'dailyBackup', 'flushQueue', 'switchbotPoll'];
   ScriptApp.getProjectTriggers().forEach(function (t) {
     if (handlers.indexOf(t.getHandlerFunction()) >= 0) ScriptApp.deleteTrigger(t);
   });
@@ -346,6 +346,11 @@ function installTriggers() {
   ScriptApp.newTrigger('nightBatch').timeBased().atHour(night).everyDays(1).inTimezone(TZ).create();
   ScriptApp.newTrigger('dailyBackup').timeBased().atHour(backup).everyDays(1).inTimezone(TZ).create();
   ScriptApp.newTrigger('flushQueue').timeBased().atHour(quietEnd).everyDays(1).inTimezone(TZ).create();
+  // SwitchBotの状態取得は朝バッチの前に走らせる（取得した値をその日の充足に使うため）
+  if (PropertiesService.getScriptProperties().getProperty('SWITCHBOT_TOKEN')) {
+    ScriptApp.newTrigger('switchbotPoll').timeBased()
+      .atHour(getSettingNum('switchbot_poll_hour', 9)).everyDays(1).inTimezone(TZ).create();
+  }
   ScriptApp.newTrigger('weeklyDigest').timeBased()
     .onWeekDay(dayOfWeek_(getSettingNum('weekly_digest_dow', 0)))
     .atHour(digestHour).inTimezone(TZ).create();

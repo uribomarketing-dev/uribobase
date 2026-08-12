@@ -187,6 +187,11 @@ function checkSetup() {
     out.push('× スクリプトプロパティ ' + PROP.WEBHOOK_KEY
       + ' 【未設定のためWebhookは全リクエストを拒否します。運用開始前に必ず設定してください】');
   }
+  out.push((props.getProperty('SWITCHBOT_TOKEN') ? '○ ' : '－ ') + 'スクリプトプロパティ SWITCHBOT_TOKEN（任意）');
+  var devices = safely_('checkSetup', function () {
+    return findRows(SHEETS.DEVICE, function (r) { return isTrue_(r['有効']); }).length;
+  }, 0);
+  out.push('SwitchBot機器（有効） ' + devices + '件');
   var staff = findRows(SHEETS.STAFF, function (r) { return isTrue_(r['有効']); });
   var linked = staff.filter(function (r) { return String(r['line_user_id'] || '').trim(); });
   out.push('有効スタッフ ' + staff.length + '名 / LINE紐付け済み ' + linked.length + '名');
@@ -214,6 +219,11 @@ function onOpen() {
     .addItem('夜の確認セットを今すぐ実行', 'nightBatch')
     .addItem('週次ダイジェストを今すぐ実行', 'weeklyDigest')
     .addItem('バックアップを今すぐ実行', 'dailyBackup')
+    .addSeparator()
+    .addSeparator()
+    .addItem('SwitchBot機器を読み込む', 'switchbotSyncDevices')
+    .addItem('SwitchBotの状態を今すぐ取得', 'switchbotPoll')
+    .addItem('SwitchBotのWebhookを登録', 'switchbotSetupWebhook')
     .addSeparator()
     .addItem('トリガーを設定する（installTriggers）', 'installTriggers')
     .addToUi();

@@ -59,6 +59,43 @@ var AUTOFILL_SOURCES = [
     }
   },
   {
+    id: 'motion_sensor',
+    生ログ種別: 'raw_motion',
+    必要フラグ: '在否自動',
+    説明: '人感・Presenceセンサー → 在否確認・夜間巡回（推定）',
+    map: function (raw) {
+      var night = String(raw['項目名']).indexOf('夜間') >= 0;
+      var out = [{ 項目名: '在否確認', 値: '在室（人感センサー自動記録）' }];
+      if (night) {
+        out.push({ 項目名: '夜間の動き', 値: String(raw['値'] || '夜間に動きを検知') + '（人感センサー自動記録）' });
+        out.push({ 項目名: '夜間巡回・就寝確認', 値: '居室で動きあり（人感センサー自動記録・要精査）', 推定: true });
+      }
+      return out;
+    }
+  },
+  {
+    id: 'lock_sensor',
+    生ログ種別: 'raw_lock',
+    必要フラグ: '',
+    説明: 'スマートロック → 戸締まり確認（推定）',
+    map: function (raw) {
+      var v = String(raw['値'] || '');
+      if (v.indexOf('施錠されている') < 0) return [];
+      return [{ 項目名: '戸締まり確認', 値: v + '（スマートロック自動記録・要精査）', 推定: true }];
+    }
+  },
+  {
+    id: 'meter_sensor',
+    生ログ種別: 'raw_meter',
+    必要フラグ: '',
+    説明: '温湿度計・Hub2 → 居室環境（実測値なので推定ではない）',
+    map: function (raw) {
+      var v = String(raw['値'] || '');
+      if (!v) return [];
+      return [{ 項目名: '居室環境', 値: v + '（自動記録）', 全利用者: String(raw['対象'] || 'ALL') === 'ALL' }];
+    }
+  },
+  {
     id: 'labo_attendance',
     生ログ種別: 'raw_labo',
     必要フラグ: '日中自動',

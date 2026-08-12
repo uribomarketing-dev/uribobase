@@ -21,7 +21,8 @@ var SHEETS = {
   SETTING: 'S8_設定',
   NAME_MAP: 'S9_対応表',
   RUN_LOG: 'S10_実行ログ',
-  SHIFT_PLAN: 'S11_勤務予定'
+  SHIFT_PLAN: 'S11_勤務予定',
+  DEVICE: 'S12_機器マスタ'
 };
 
 /**
@@ -90,6 +91,13 @@ var SHEET_DEFS = [
     name: SHEETS.SHIFT_PLAN,
     headers: ['日付', 'staff_id', '拠点', '勤務区分', '開始時刻', '終了時刻', '取込元'],
     note: 'Stage2で使用。夜勤担当の特定と勤務開始1時間前送信に使う'
+  },
+  {
+    name: SHEETS.DEVICE,
+    headers: ['deviceId', 'deviceName', 'deviceType', 'deviceMac', '拠点', '対象user_code', '用途種別', '有効', '備考'],
+    note: 'SwitchBot機器の台帳。switchbotSyncDevices()が機器を並べるので、'
+        + '拠点・対象user_code・用途種別（服薬ボックス/玄関/居室ドア/人感/温湿度/施錠/家電/漏水）を'
+        + '人が確認して有効=TRUEにする。deviceMacはアプリのデバイス情報から転記するとWebhookが紐付く'
   }
 ];
 
@@ -119,6 +127,7 @@ var DEFAULT_SETTINGS = [
   ['register_attempt_limit', '10', '登録コードの入力を1時間に何回まで許すか'],
   ['alert_keywords', '転倒,倒れ,うつ伏せ,座り込,出血,救急,発熱,嘔吐,痙攣,water leak',
    'AIまとめ等の文章にこの語が出たら、社員へすぐLINE通知する（カンマ区切り）'],
+  ['switchbot_poll_hour', '9', 'SwitchBotの状態を取りに行く時刻（朝バッチの前）'],
   ['autofill_estimate', 'TRUE', 'データから推定できるものも積極的に埋めるか（FALSEにすると事実のログだけ埋める）']
 ];
 

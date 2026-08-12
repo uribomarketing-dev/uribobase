@@ -35,6 +35,12 @@ function doPost(e) {
     }
     var body = JSON.parse(e.postData.contents);
 
+    // SwitchBotのWebhook（機器の変化通知）
+    if (!body.events && body.eventType && body.context) {
+      var m = safely_(proc, function () { return ingestSwitchbotWebhook_(body); }, 0);
+      return ContentService.createTextOutput('OK:' + m);
+    }
+
     // LINE以外からの投入も同じ入口で受ける（送信元を本文の形で見分ける）
     if (!body.events && (body.observations || body.source)) {
       var n = ingestObservations_(body);
