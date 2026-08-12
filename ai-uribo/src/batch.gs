@@ -28,6 +28,9 @@ function morningBatch() {
 
       safely_(proc, function () { flushQueue(); });
       var auto = safely_(proc, function () { return runAutoFill(targetDate); }, { filled: 0 });
+      // 埋めた直後に噛み合わない記録を洗う。ここで聞き直しに戻した項目は、この後の検出で質問になる
+      var bad = safely_(proc, function () { return checkConsistency(targetDate); },
+        { 再確認: 0, 要判断: 0, 一覧: [] });
       safely_(proc, function () { scanAlerts_(targetDate); });
       var gaps = safely_(proc, function () { return detectGaps(targetDate, ['R01', 'R02', 'R05']); }, []);
       safely_(proc, function () { registerGaps(gaps); });
@@ -40,7 +43,8 @@ function morningBatch() {
         proc
       );
 
-      var summary = '自動充足' + auto.filled + '件 / 新規検出' + gaps.length + '件 / 送信' + sentTotal + '件';
+      var summary = '自動充足' + auto.filled + '件 / 食い違い' + bad.一覧.length + '件'
+        + ' / 新規検出' + gaps.length + '件 / 送信' + sentTotal + '件';
       logInfo(proc, summary);
       return summary;
     } catch (e) {
@@ -169,6 +173,11 @@ function weeklyDigest() {
         + Math.round(wrong * 100 / feedback.length) + '%）');
     }
     if (stale.length) lines.push('※8時間以上返事待ちの項目：' + stale.length + '件');
+    var conflicts = findRows(SHEETS.RUN_LOG, function (r) {
+      var d = toDateTimeStr_(r['日時']).substring(0, 10);
+      return String(r['結果']) === '食い違い' && d >= from && d <= to;
+    }).length;
+    if (conflicts) lines.push('記録の食い違い：' + conflicts + '件（聞き直しか、社員への確認を出しています）');
 
     // 学習の進み具合（＝どれだけ質問が減ったか）を毎週示す
     var saved = safely_(proc, function () { return countAutoConfirmed_(from, to); }, 0);

@@ -192,7 +192,7 @@ function mockFolder(name) {
 function iter(arr) { let i = 0; return { hasNext: () => i < arr.length, next: () => arr[i++] }; }
 
 vm.createContext(sandbox);
-['config', 'db', 'log', 'notify', 'setup', 'learn', 'autofill', 'detect', 'ask', 'batch', 'webhook', 'backup', 'diagnose', 'switchbot', 'selfcheck', 'users'].forEach(f => {
+['config', 'db', 'log', 'notify', 'setup', 'learn', 'autofill', 'detect', 'ask', 'batch', 'webhook', 'backup', 'diagnose', 'switchbot', 'selfcheck', 'users', 'consistency'].forEach(f => {
   vm.runInContext(fs.readFileSync(path.join(SRC, f + '.gs'), 'utf8'), sandbox, { filename: f + '.gs' });
 });
 
@@ -800,6 +800,65 @@ check('診断に個人情報を含めない', diagText.indexOf('U_FUJI') < 0 && 
 replies.length = 0;
 post([{ type: 'message', webhookEventId: 'e35', source: { userId: 'U_NIGHT' }, message: { type: 'text', text: '診断' }, replyToken: 'r35' }]);
 check('夜勤は診断コマンドを使えない', JSON.stringify(replies[0] || '').indexOf('社員のみ') > 0, replies[0]);
+
+console.log('\n=== T13 記録の食い違い ===');
+const conDate = run(`addDays_(todayStr_(),-7)`);
+const putRec = (item, value, certainty) => run(`appendRow(SHEETS.LOG_IMPORT,{
+  log_id:nextSeqId_(SHEETS.LOG_IMPORT,'log_id','LOG',6),発生日:'${conDate}',対象種別:'support',
+  対象:'TEST01',項目名:'${item}',値:'${value}',取込元:'test',取込日時:nowStr_(),
+  確度:'${certainty}',推定回答:''})`);
+// 人が「外泊・帰省」と答えた日に、推定で「朝夕とも提供」が入っている
+putRec('在否確認', '外泊・帰省', '確定');
+putRec('食事提供', '朝夕とも提供', '推定');
+run(`appendRow(SHEETS.FILL,{fill_id:nextSeqId_(SHEETS.FILL,'fill_id','FIL',6),対象日:'${conDate}',
+  対象:'TEST01',項目名:'食事提供',値:'朝夕とも提供',記入者staff_id:'AUTO:test',取込済フラグ:false,
+  作成日時:nowStr_(),gap_id:'',情報源:'自動推定（test）',要精査:true,精査結果:''})`);
+pushes.length = 0;
+const con1 = run(`checkConsistency('${conDate}')`);
+check('不在の日の食事提供の食い違いに気づく', con1.一覧.length === 1, con1);
+check('推定で入っていた方を聞き直しに戻す', con1.再確認 === 1 && con1.要判断 === 0, con1);
+check('記録は消さずに残す（人が見て判断できる）',
+  rows('LOG_IMPORT').some(l => l.発生日 === conDate && l.項目名 === '食事提供' && String(l.値) === '朝夕とも提供'));
+check('補完台帳に食い違いの印が付く',
+  rows('FILL').some(f => f.対象日 === conDate && f.項目名 === '食事提供'
+    && String(f.精査結果).indexOf('食い違い') === 0), rows('FILL').slice(-2));
+check('片方が推定なら社員を煩わせない（自動で聞き直すだけ）', pushes.length === 0, pushes.length);
+// 不在の日はそもそも質問しない（食い違いを見つけても、聞かなくてよい日に質問を増やさない）
+check('不在の日に余計な質問を増やさない',
+  !run(`(function(){
+    var u=findRow(SHEETS.USER,{'user_code':'TEST01'});updateRow(SHEETS.USER,u._row,{'有効':true});
+    var c=checkById_('CHK105');updateRow(SHEETS.CHECK,c._row,{'有効':true});checkById_._map=null;
+    return detectGaps('${conDate}',['R02']);
+  })()`).some(g => g.check_id === 'CHK105' && g.対象 === 'TEST01'));
+check('食い違った推定は「精査」の一覧に戻る',
+  String(run('buildReviewText_()')).indexOf('食事提供') > 0, run('buildReviewText_()').substring(0, 200));
+
+// 両方とも人の回答なら、機械には決められないので社員に知らせる
+const conDate2 = run(`addDays_(todayStr_(),-8)`);
+const putRec2 = (item, value, certainty) => run(`appendRow(SHEETS.LOG_IMPORT,{
+  log_id:nextSeqId_(SHEETS.LOG_IMPORT,'log_id','LOG',6),発生日:'${conDate2}',対象種別:'support',
+  対象:'TEST01',項目名:'${item}',値:'${value}',取込元:'ai-uribo',取込日時:nowStr_(),
+  確度:'${certainty}',推定回答:''})`);
+putRec2('在否確認', '入院', '確定');
+putRec2('日中活動', '参加した', '確定');
+pushes.length = 0;
+const con2 = run(`checkConsistency('${conDate2}')`);
+check('人の回答どうしの食い違いは勝手に直さない', con2.要判断 === 1 && con2.再確認 === 0, con2);
+check('社員に両方の記録を示して判断を仰ぐ',
+  JSON.stringify(pushes).indexOf('記録の食い違い') > 0
+    && JSON.stringify(pushes).indexOf('在否確認＝入院') > 0, JSON.stringify(pushes).substring(0, 200));
+check('食い違いはS10に残り、週次で数えられる',
+  rows('RUN_LOG').some(r => String(r.結果) === '食い違い'));
+// 噛み合っている記録では何も起きない
+const conDate3 = run(`addDays_(todayStr_(),-9)`);
+run(`appendRow(SHEETS.LOG_IMPORT,{log_id:nextSeqId_(SHEETS.LOG_IMPORT,'log_id','LOG',6),
+  発生日:'${conDate3}',対象種別:'support',対象:'TEST01',項目名:'在否確認',値:'在宅',
+  取込元:'ai-uribo',取込日時:nowStr_(),確度:'確定',推定回答:''})`);
+run(`appendRow(SHEETS.LOG_IMPORT,{log_id:nextSeqId_(SHEETS.LOG_IMPORT,'log_id','LOG',6),
+  発生日:'${conDate3}',対象種別:'support',対象:'TEST01',項目名:'食事提供',値:'朝夕とも提供',
+  取込元:'ai-uribo',取込日時:nowStr_(),確度:'確定',推定回答:''})`);
+check('噛み合っている記録は何も起きない',
+  run(`checkConsistency('${conDate3}')`).一覧.length === 0);
 
 console.log('\n=== T12 自己点検と自動整理（手がかからない仕組み） ===');
 // 1. トリガーが消えていたら、自分で入れ直す
