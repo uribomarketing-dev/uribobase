@@ -296,15 +296,22 @@ run(`(function(){
   appendRow(SHEETS.LOG_IMPORT,{log_id:'RAW1',発生日:addDays_(todayStr_(),-1),対象種別:'raw_switchbot',対象:'TEST01',項目名:'服薬',値:'OK',取込元:'switchbot',取込日時:nowStr_()});
 })()`);
 const autoRes = run(`runAutoFill(addDays_(todayStr_(),-1))`);
-check('SwitchBotログで服薬確認が自動充足', autoRes.filled === 1, autoRes);
+check('SwitchBotログが「服薬ボックス開放」として記録される',
+  autoRes.filled === 1 && rows('LOG_IMPORT').some(l => String(l.項目名) === '服薬ボックス開放'), autoRes);
 const d2 = run(`detectGaps(addDays_(todayStr_(),-1),['R02'])`);
-check('自動充足済みの服薬は不足にならない', !d2.some(g => g.check_id === 'CHK106'), d2);
-check('在否確認は不足として残る', d2.some(g => g.check_id === 'CHK101'), d2);
+check('服薬確認は自動で埋めず人に聞く（センサーは合図にすぎないため）',
+  d2.some(g => g.check_id === 'CHK106'), d2);
+check('在否確認も不足として残る', d2.some(g => g.check_id === 'CHK101'), d2);
 pushes.length = 0;
 console.log('  morningBatch（支援記録あり） → ' + run('morningBatch()'));
 check('Stage1は藤原・服部の2名にまとめて送信', pushes.length === 2 && pushes.map(p => p.to).sort().join() === 'U_FUJI,U_HATT', pushes.map(p => p.to));
 check('在否確認の不足がS5に登録', rows('GAP').some(g => g.check_id === 'CHK101' && g.対象 === 'TEST01'));
-check('自動充足済みの服薬はS5に登録されない', !rows('GAP').some(g => g.check_id === 'CHK106'));
+const medGap = rows('GAP').find(g => g.check_id === 'CHK106' && g.対象 === 'TEST01');
+const medMsgs = run(`buildQuestion_({task_id:'TSKX'}, findRow(SHEETS.GAP,{'gap_id':'${medGap.gap_id}'}), checkById_('CHK106'), 0)`);
+check('服薬確認の質問に開放ログが判断材料として添えられる',
+  JSON.stringify(medMsgs).indexOf('服薬ボックス開放：開放を検知') > 0, medMsgs);
+check('参照ログが無い項目には余計な情報を付けない',
+  run(`buildQuestion_({task_id:'TSKX'}, findRow(SHEETS.GAP,{'gap_id':'${medGap.gap_id}'}), checkById_('CHK101'), 0)`).length === 1);
 pushes.length = 0;
 console.log('  nightBatch → ' + run('nightBatch()'));
 check('夜勤不在時は社員へ送信', pushes.length >= 1, pushes.length);

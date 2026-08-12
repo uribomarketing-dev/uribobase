@@ -69,7 +69,7 @@ function sendNextInSet_(setId, replyToken, prefixMessages) {
     if (!check) { updateRow(SHEETS.TASK, t._row, { '送信状態': SEND_STATUS.CANCELED }); continue; }
 
     var remain = tasks.length - i - 1;
-    var messages = (prefixMessages || []).concat([buildQuestion_(t, gap, check, remain)]);
+    var messages = (prefixMessages || []).concat(buildQuestion_(t, gap, check, remain));
 
     if (replyToken) {
       var ok = replyRaw_(replyToken, messages);
@@ -95,11 +95,13 @@ function sendNextInSet_(setId, replyToken, prefixMessages) {
 
 /**
  * 1件分の質問メッセージを作る。質問文・選択肢はS3チェック項目マスタの内容を使う。
+ * S3の「参照ログ」に項目名が入っていれば、その自動ログを判断材料として質問の前に添える。
+ * （自動データを支援の記録の代わりにせず、人が判断するための材料として見せるための仕組み）
  * @param {Object} task S6の行
  * @param {Object} gap S5の行
  * @param {Object} check S3の行
  * @param {number} remain このセットの残り件数
- * @return {Object} LINEメッセージオブジェクト
+ * @return {Array.<Object>} LINEメッセージオブジェクトの配列
  */
 function buildQuestion_(task, gap, check, remain) {
   var text = fillPlaceholders_(String(check['質問文']), gap);
@@ -111,7 +113,34 @@ function buildQuestion_(task, gap, check, remain) {
   });
   var title = String(check['項目名']);
   if (remain > 0) title += '（残り' + remain + '件）';
-  return msgButtons_(title, text, actions);
+
+  var messages = [];
+  var context = referenceLogText_(gap, check);
+  if (context) messages.push(msgText_(context));
+  messages.push(msgButtons_(title, text, actions));
+  return messages;
+}
+
+/**
+ * 参照ログ（判断材料になる自動データ）の文面を作る。
+ * @param {Object} gap S5の行
+ * @param {Object} check S3の行
+ * @return {string} 添える文面（無ければ空文字）
+ */
+function referenceLogText_(gap, check) {
+  var name = String(check['参照ログ'] || '').trim();
+  if (!name) return '';
+  var row = safely_('referenceLogText_', function () {
+    return findRow(SHEETS.LOG_IMPORT, function (r) {
+      return toDateStr_(r['発生日']) === toDateStr_(gap['対象日'])
+        && String(r['項目名']) === name
+        && String(r['対象']) === String(gap['対象']);
+    });
+  }, null);
+  if (!row) {
+    return '（参考）' + toDateStr_(gap['対象日']) + ' の「' + name + '」の自動記録はありませんでした。';
+  }
+  return '（参考）' + name + '：' + String(row['値']);
 }
 
 /**

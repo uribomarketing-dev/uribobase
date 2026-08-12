@@ -140,7 +140,14 @@ function menuIssueCode_() {
 function seedChecks_() {
   if (findRows(SHEETS.CHECK).length > 0) return false;
   var sh = sheet_(SHEETS.CHECK);
-  sh.getRange(2, 1, INITIAL_CHECKS.length, INITIAL_CHECKS[0].length).setValues(INITIAL_CHECKS);
+  var width = readTable(SHEETS.CHECK).headers.length;
+  // 行ごとに列数が違っても崩れないよう、ヘッダーの列数にそろえる
+  var values = INITIAL_CHECKS.map(function (row) {
+    var copy = row.slice();
+    while (copy.length < width) copy.push('');
+    return copy.slice(0, width);
+  });
+  sh.getRange(2, 1, values.length, width).setValues(values);
   invalidateCache_(SHEETS.CHECK);
   return true;
 }
