@@ -103,7 +103,7 @@ function sendNextInSet_(setId, replyToken, prefixMessages) {
  */
 function buildQuestion_(task, gap, check, remain) {
   var text = fillPlaceholders_(String(check['質問文']), gap);
-  var choices = String(check['選択肢'] || '').split('|').filter(function (s) { return s.trim(); });
+  var choices = expandChoices_(String(check['選択肢'] || ''));
   if (!choices.length) choices = ['済', 'できていない', 'わからない'];
 
   var actions = choices.map(function (c) {
@@ -112,6 +112,23 @@ function buildQuestion_(task, gap, check, remain) {
   var title = String(check['項目名']);
   if (remain > 0) title += '（残り' + remain + '件）';
   return msgButtons_(title, text, actions);
+}
+
+/**
+ * 選択肢を展開する。
+ * `{夜勤スタッフ}` と書いておくと、S1の有効な夜勤スタッフの氏名（最大3名）＋「その他（名前を入力）」になる。
+ * 名前をコードに埋め込まず、スタッフの入れ替わりに自動で追従させるための仕組み。
+ * @param {string} raw S3の選択肢欄の値
+ * @return {Array.<string>} 選択肢の配列
+ */
+function expandChoices_(raw) {
+  if (String(raw).indexOf('{夜勤スタッフ}') < 0) {
+    return String(raw).split('|').filter(function (s) { return s.trim(); });
+  }
+  var names = findRows(SHEETS.STAFF, function (r) {
+    return isTrue_(r['有効']) && String(r['役割']).indexOf('夜勤') >= 0;
+  }).map(function (r) { return String(r['氏名']); }).slice(0, 3);
+  return names.concat(['その他（名前を入力）']);
 }
 
 /**
@@ -344,17 +361,49 @@ function recordFill_(gap, check, value, staff) {
 
 /**
  * その記録が「誰の情報か」を判定する。
- * 監査では「いつ・誰が・誰に・何をしたか」が問われるため、
- * 本人が答えたのか、支援した本人の記録か、社員の代理入力かを区別して残す。
+ * 監査では「いつ・誰が・誰に・何をしたか」が問われるため、支援した人と確認した人を分けて残す。
+ *
+ * ・本人回答             … スタッフ本人のこと（シフト希望など）
+ * ・支援担当者の記録     … 支援した本人（夜勤・世話人）がその場で答えた
+ * ・支援担当者名＋管理者確認 … 社員・管理者が拠点を回り、紙台帳や口頭で担当者を確認して入力した
+ *                            （代理入力ではなく、担当者名と確認者名の両方を残す形）
+ * ・自動ログ             … 機械の記録（autofill.gs 側で付与）
  * @param {Object} gap S5の行
  * @param {Object} staff 回答したスタッフのS1行
  * @return {string} 情報源
  */
 function fillSourceOf_(gap, staff) {
   if (String(gap['対象']) === String(staff['staff_id'])) return '本人回答';
+
   var role = String(staff['役割']);
-  if (role === '社員' || role === '管理者') return '代理入力（' + role + '）';
-  return '支援担当者の記録（' + role + '）';
+  if (role !== '社員' && role !== '管理者') {
+    return '支援担当者の記録（' + String(staff['氏名']) + '）';
+  }
+
+  // 社員・管理者が入力した場合は、その日の夜勤担当者名とセットで残す
+  var site = siteOfTarget_(String(gap['対象']));
+  var name = site ? safely_('fillSourceOf_', function () {
+    return nightStaffNameOf_(gap['対象日'], site);
+  }, '') : '';
+  if (name) return '支援担当者：' + name + '／管理者確認：' + String(staff['氏名']);
+  return '管理者確認：' + String(staff['氏名']) + '（担当者名は未記録）';
+}
+
+/**
+ * 対象（user_code または拠点名）の拠点を返す。
+ * @param {string} target 対象
+ * @return {string} 拠点名（分からなければ空文字）
+ */
+function siteOfTarget_(target) {
+  var user = safely_('siteOfTarget_', function () {
+    return findRow(SHEETS.USER, { 'user_code': target });
+  }, null);
+  if (user && user['拠点']) return String(user['拠点']);
+  // 夜勤担当者の質問そのものは対象が拠点名
+  var isSite = safely_('siteOfTarget_', function () {
+    return findRows(SHEETS.USER).some(function (u) { return String(u['拠点']) === String(target); });
+  }, false);
+  return isSite ? String(target) : '';
 }
 
 /**

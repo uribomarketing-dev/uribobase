@@ -31,6 +31,7 @@ function detectGaps(targetDate, ruleFilter) {
         case 'R01': gaps = gaps.concat(ruleR01_(date, c)); break;
         case 'R02': gaps = gaps.concat(ruleR02_(date, c)); break;
         case 'R04': gaps = gaps.concat(ruleR04_(date, c)); break;
+        case 'R05': gaps = gaps.concat(ruleR05_(date, c)); break;
         default: logWarn(proc, '未対応の判定ルールID: ' + rule + '（' + c['check_id'] + '）');
       }
     });
@@ -146,6 +147,57 @@ function ruleR04_(targetDate, check) {
     });
   });
   return gaps;
+}
+
+/**
+ * R05：その日の夜勤担当者が未記録。
+ * 利用者ごとではなく「拠点ごとに1日1問」だけ聞く。この回答が、同じ日・同じ拠点の
+ * 全記録の「支援担当者」になり、監査で問われる「誰が支援したか」を満たす。
+ * @param {string} targetDate 対象日 YYYY-MM-DD
+ * @param {Object} check S3の行
+ * @return {Array.<Object>} 不足の配列
+ */
+function ruleR05_(targetDate, check) {
+  var date = toDateStr_(targetDate);
+  var have = {};
+  findRows(SHEETS.LOG_IMPORT, function (r) {
+    return toDateStr_(r['発生日']) === date && String(r['項目名']) === String(check['項目名']);
+  }).forEach(function (r) { have[String(r['対象'])] = true; });
+
+  // 有効な利用者がいる拠点だけを対象にする（誰もいない拠点には聞かない）
+  var sites = {};
+  findRows(SHEETS.USER, function (r) { return isTrue_(r['有効']); })
+    .forEach(function (u) { if (u['拠点']) sites[String(u['拠点'])] = true; });
+
+  var gaps = [];
+  Object.keys(sites).forEach(function (site) {
+    if (have[site]) return;
+    gaps.push({
+      check_id: String(check['check_id']),
+      対象: site,
+      対象日: date,
+      理由: date + 'の' + site + 'の夜勤担当者が未記録'
+    });
+  });
+  return gaps;
+}
+
+/**
+ * 指定日・指定拠点の夜勤担当者名を返す（記録されていなければ空文字）。
+ * @param {string} targetDate 対象日 YYYY-MM-DD
+ * @param {string} site 拠点
+ * @return {string} 夜勤担当者名
+ */
+function nightStaffNameOf_(targetDate, site) {
+  var row = findRow(SHEETS.LOG_IMPORT, function (r) {
+    return toDateStr_(r['発生日']) === toDateStr_(targetDate)
+      && String(r['項目名']) === '夜勤担当者'
+      && String(r['対象']) === String(site);
+  });
+  if (!row) return '';
+  // 「その他（名前を入力）／山田太郎」のように追記されている場合は後半を採る
+  var parts = String(row['値']).split('／');
+  return parts.length > 1 ? parts[parts.length - 1].trim() : String(row['値']).trim();
 }
 
 /**

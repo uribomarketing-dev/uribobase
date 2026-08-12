@@ -28,7 +28,7 @@ function morningBatch() {
 
       safely_(proc, function () { flushQueue(); });
       var auto = safely_(proc, function () { return runAutoFill(targetDate); }, { filled: 0 });
-      var gaps = safely_(proc, function () { return detectGaps(targetDate, ['R01', 'R02']); }, []);
+      var gaps = safely_(proc, function () { return detectGaps(targetDate, ['R01', 'R02', 'R05']); }, []);
       safely_(proc, function () { registerGaps(gaps); });
 
       var md = formatMd_(targetDate);

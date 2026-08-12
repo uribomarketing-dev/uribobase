@@ -328,6 +328,37 @@ if (sentTwin) {
   check('他の人が回答済みと案内する', JSON.stringify(replies).indexOf('他の方が回答済み') > 0, replies[0]);
 }
 
+console.log('\n=== T7d 夜勤担当者の記録と情報源 ===');
+run(`(function(){
+  if (!staffById_('STF900')) appendRow(SHEETS.STAFF,{staff_id:'STF900',氏名:'テスト夜勤',line_user_id:'U_NIGHT',役割:'夜勤',拠点:'清水',エスカレーション先フラグ:false,有効:true});
+  var c=checkById_('CHK100');updateRow(SHEETS.CHECK,c._row,{'有効':true});
+  appendRow(SHEETS.USER,{user_code:'TEST02',拠点:'清水',自動ログ対応:false,服薬自動:false,在否自動:false,日中自動:false,有効:true});
+})()`);
+pushes.length = 0;
+run('morningBatch()');
+const nightGaps = rows('GAP').filter(g => g.check_id === 'CHK100');
+check('夜勤担当者は拠点ごとに1問だけ', nightGaps.length === 1 && nightGaps[0].対象 === '清水', nightGaps);
+check('選択肢に夜勤スタッフ名が入る', JSON.stringify(pushes).indexOf('テスト夜勤') > 0);
+
+const dutyTask = rows('TASK').find(t => t.gap_id === nightGaps[0].gap_id && t.送信先staff_id === 'STF001');
+post([{ type: 'postback', webhookEventId: 'e40', source: { userId: 'U_FUJI' }, postback: { data: 'ans|' + dutyTask.task_id + '|テスト夜勤' }, replyToken: 'r40' }]);
+check('夜勤担当者がS4に記録される',
+  rows('LOG_IMPORT').some(l => String(l.項目名) === '夜勤担当者' && String(l.値).indexOf('テスト夜勤') >= 0));
+
+// 同じ日の利用者記録に「支援担当者名＋管理者確認」が入る
+const userTask = rows('TASK').find(t => {
+  const g = rows('GAP').find(x => x.gap_id === t.gap_id);
+  return g && g.対象 === 'TEST02' && t.送信先staff_id === 'STF001' && !String(t.回答 || '');
+});
+if (userTask) {
+  post([{ type: 'postback', webhookEventId: 'e41', source: { userId: 'U_FUJI' }, postback: { data: 'ans|' + userTask.task_id + '|在宅' }, replyToken: 'r41' }]);
+  const fill = rows('FILL').filter(f => f.対象 === 'TEST02').pop();
+  check('情報源が「支援担当者名＋管理者確認」になる',
+    fill && String(fill.情報源).indexOf('支援担当者：テスト夜勤') === 0 && String(fill.情報源).indexOf('管理者確認：藤原寛') > 0,
+    fill && fill.情報源);
+}
+run(`(function(){var c=checkById_('CHK100');updateRow(SHEETS.CHECK,c._row,{'有効':false});})()`);
+
 console.log('\n=== T7c 深夜帯のキュー保存と朝の送信 ===');
 const setQuiet = (s, e) => run(`(function(){
   var a=findRow(SHEETS.SETTING,{'キー':'quiet_start_hour'});updateRow(SHEETS.SETTING,a._row,{'値':${s}});
@@ -431,11 +462,12 @@ check('無効スタッフの操作を拒否', JSON.stringify(replies[0] || '').i
 run(`(function(){var s=staffById_('STF002');updateRow(SHEETS.STAFF,s._row,{'有効':true});})()`);
 
 // 7. 夜勤スタッフの「状況」は自分の担当分だけ
-run(`(function(){
-  appendRow(SHEETS.STAFF,{staff_id:'STF900',氏名:'テスト夜勤',line_user_id:'U_NIGHT',役割:'夜勤',拠点:'清水',エスカレーション先フラグ:false,有効:true});})()`);
 replies.length = 0;
 post([{ type: 'message', webhookEventId: 'e33', source: { userId: 'U_NIGHT' }, message: { type: 'text', text: '状況' }, replyToken: 'r33' }]);
-check('夜勤には自分の担当分だけ表示', JSON.stringify(replies[0] || '').indexOf('あなたの未完了：0件') > 0, replies[0]);
+const nightStatus = JSON.stringify(replies[0] || '');
+check('夜勤には自分の担当分だけ表示',
+  nightStatus.indexOf('あなたの未完了') > 0 && nightStatus.indexOf('TEST02') < 0 && nightStatus.indexOf('TEST01') < 0,
+  replies[0]);
 
 // 8. 監査対応：記録の出所（情報源）が残る
 const fillsWithSource = rows('FILL').filter(f => String(f.情報源 || '').trim());
