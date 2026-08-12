@@ -9,6 +9,7 @@ const vm = require('vm');
 const crypto = require('crypto');
 
 const SRC = path.join(__dirname, '..', 'src');
+const SHEET_OPS = { read: 0, write: 0 };
 const TZ_OFFSET_MS = 9 * 3600 * 1000;
 
 // ---- Sheet mock -------------------------------------------------------------
@@ -34,18 +35,21 @@ class MockSheet {
   insertColumnsAfter() { return this; }
   setFrozenRows() { return this; }
   appendRow(values) {
+    SHEET_OPS.write++;
     const r = this.getLastRow() + 1;
     this._ensure(r, values.length);
     for (let c = 0; c < values.length; c++) this.data[r - 1][c] = values[c];
     return this;
   }
   getRange(row, col, numRows = 1, numCols = 1) { return new MockRange(this, row, col, numRows, numCols); }
+  // シート操作の回数を数える（件数が増えたときに処理量が跳ね上がらないかを見るため）
 }
 class MockRange {
   constructor(sheet, row, col, numRows, numCols) {
     Object.assign(this, { sheet, row, col, numRows, numCols });
   }
   getValues() {
+    SHEET_OPS.read++;
     const out = [];
     for (let r = 0; r < this.numRows; r++) {
       const row = [];
@@ -60,6 +64,7 @@ class MockRange {
   }
   getDisplayValues() { return this.getValues().map(r => r.map(v => String(v === null || v === undefined ? '' : v))); }
   setValues(values) {
+    SHEET_OPS.write++;
     this.sheet._ensure(this.row - 1 + values.length, this.col - 1 + values[0].length);
     values.forEach((row, r) => row.forEach((v, c) => { this.sheet.data[this.row - 1 + r][this.col - 1 + c] = v; }));
     return this;
@@ -1119,6 +1124,85 @@ check('自己点検が処理の遅れに気づいて知らせる',
   JSON.stringify(pushes).indexOf('時間内に終わらず') > 0, JSON.stringify(pushes).substring(0, 300));
 check('実行にかかった秒数が実行ログに残る（遅くなってきたら分かる）',
   String(run('morningBatch()')).indexOf('秒') > 0);
+
+console.log('\n=== T22 実データ量での処理量（6分制限への備え） ===');
+// 件数が増えたときに処理量が跳ね上がる（O(n^2)になる）と、いつか6分の制限に当たる。
+// 利用者を倍にして、処理量がおおむね倍で収まるかを見る。
+const seedScale = (users, days) => run(`(function(){
+  // 既存の行は消さない（あとのテストが使うため）。SCALE利用者だけを増やして測る
+  findRows(SHEETS.USER).forEach(function(u){
+    var code = String(u['user_code']);
+    if (code.indexOf('SCALE') !== 0) updateRow(SHEETS.USER,u._row,{'有効':false});
+  });
+  for (var i = 1; i <= ${users}; i++) {
+    var code = 'SCALE' + i;
+    var exists = findRow(SHEETS.USER,{'user_code':code});
+    if (exists) {
+      updateRow(SHEETS.USER,exists._row,{'有効':true});
+    } else {
+      appendRow(SHEETS.USER,{user_code:code,拠点:'清水',自動ログ対応:false,服薬自動:true,
+        在否自動:true,日中自動:false,有効:true});
+      for (var d = 1; d <= ${days}; d++) {
+        appendRow(SHEETS.LOG_IMPORT,{log_id:nextSeqId_(SHEETS.LOG_IMPORT,'log_id','LOG',6),
+          発生日:addDays_(todayStr_(), -d),対象種別:'raw_door',対象:code,項目名:'玄関',値:'開',
+          取込元:'switchbot-webhook:dev'+i,取込日時:nowStr_()});
+      }
+    }
+  }
+  ['CHK101','CHK105','CHK106'].forEach(function(id){
+    var c=checkById_(id);updateRow(SHEETS.CHECK,c._row,{'有効':true});});
+  checkById_._map=null;
+  return findRows(SHEETS.USER,function(u){return isTrue_(u['有効']);}).length;
+})()`);
+
+const measure = (users, dayOffset) => {
+  seedScale(users, 30);
+  // 測るのは利用者の数で増える部分（自動充足・不足検出・登録）。
+  // 対象日を毎回変えて、前回の結果に引きずられないようにする
+  SHEET_OPS.read = 0;
+  SHEET_OPS.write = 0;
+  const result = run(`(function(){
+    var day = addDays_(todayStr_(), -${dayOffset});
+    var auto = runAutoFill(day);
+    var gaps = detectGaps(day, ['R02']);
+    registerGaps(gaps);
+    return { 充足: auto.filled, 検出: gaps.length };
+  })()`);
+  return { ops: SHEET_OPS.read + SHEET_OPS.write, 充足: result.充足, 検出: result.検出 };
+};
+const small = measure(3, 2);
+const large = measure(6, 3);
+console.log('   利用者3名: ' + small.ops + '操作（充足' + small.充足 + '件・検出' + small.検出 + '件）');
+console.log('   利用者6名: ' + large.ops + '操作（充足' + large.充足 + '件・検出' + large.検出 + '件）');
+check('利用者が倍になれば仕事も倍になっている（測定が成立している）',
+  large.検出 >= small.検出 * 1.8 && large.充足 >= small.充足 * 1.8,
+  JSON.stringify({ small: small, large: large }));
+check('それでも処理量は倍程度に収まる（O(n^2)になっていない）',
+  large.ops < small.ops * 3, small.ops + ' → ' + large.ops);
+check('1日分の処理でシート操作が過大にならない', large.ops < 4000, large.ops);
+
+// 台帳が育っても、古い行は保管へ移せる
+run(`(function(){
+  var r=findRow(SHEETS.SETTING,{'キー':'archive_after_days'});updateRow(SHEETS.SETTING,r._row,{'値':'10'});
+  clearSettingCache();
+})()`);
+const beforeScaleArchive = rows('LOG_IMPORT').length;
+run('archiveOldRows()');
+check('育った台帳から古い行を保管へ移せる',
+  rows('LOG_IMPORT').length < beforeScaleArchive,
+  beforeScaleArchive + ' → ' + rows('LOG_IMPORT').length);
+check('移した分は保管シートに残っている',
+  run(`findRows('S4_実績ログ取込_保管')`).length > 0);
+
+// 後片付け（あとのテストに影響させない）
+run(`(function(){
+  var r=findRow(SHEETS.SETTING,{'キー':'archive_after_days'});updateRow(SHEETS.SETTING,r._row,{'値':'180'});
+  clearSettingCache();
+  findRows(SHEETS.USER).forEach(function(u){
+    var code = String(u['user_code']);
+    updateRow(SHEETS.USER,u._row,{'有効': code.indexOf('SCALE') === 0 ? false : true});
+  });
+})()`);
 
 console.log('\n=== T21 回答の訂正（押し間違いを本人が直せる） ===');
 // 訂正できる回答がないときは、そう伝える
