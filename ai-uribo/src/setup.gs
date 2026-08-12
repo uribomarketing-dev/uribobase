@@ -298,6 +298,7 @@ function onOpen() {
     .addItem('利用者を登録する', 'menuAddUser_')
     .addItem('登録済みの利用者を見る', 'menuListUsers_')
     .addItem('支援記録の質問を開始する（Phase2）', 'menuEnablePhase2_')
+    .addItem('シフト表を取り込む', 'menuImportShift_')
     .addSeparator()
     .addItem('診断情報をコピー', 'menuDiagnostics_')
     .addSeparator()

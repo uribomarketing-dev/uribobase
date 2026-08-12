@@ -195,7 +195,7 @@ function mockFolder(name) {
 function iter(arr) { let i = 0; return { hasNext: () => i < arr.length, next: () => arr[i++] }; }
 
 vm.createContext(sandbox);
-['config', 'db', 'log', 'notify', 'setup', 'learn', 'autofill', 'detect', 'ask', 'batch', 'webhook', 'backup', 'diagnose', 'switchbot', 'selfcheck', 'users', 'consistency', 'api', 'monthly'].forEach(f => {
+['config', 'db', 'log', 'notify', 'setup', 'learn', 'autofill', 'detect', 'ask', 'batch', 'webhook', 'backup', 'diagnose', 'switchbot', 'selfcheck', 'users', 'consistency', 'api', 'monthly', 'shift'].forEach(f => {
   vm.runInContext(fs.readFileSync(path.join(SRC, f + '.gs'), 'utf8'), sandbox, { filename: f + '.gs' });
 });
 
@@ -208,6 +208,7 @@ function check(label, cond, extra) {
 }
 const rows = sheet => run(`findRows(SHEETS.${sheet})`);
 const clearCache = () => Object.keys(cache).forEach(k => delete cache[k]);
+const toStr = v => run(`toDateStr_(${JSON.stringify(String(v))})`);
 const isTrueLike = v => v === true || String(v).toLowerCase() === 'true';
 
 console.log('\n=== T1 台帳生成 ===');
@@ -899,6 +900,60 @@ check('生存確認で残件とテストモードが分かる',
 check('知らないmodeは何も返さない', apiGet({ k: 'k123', mode: 'nope' }).ok === false);
 check('日付で絞り込める',
   apiGet({ k: 'k123', mode: 'fills', from: '2099-01-01' }).count === 0);
+
+console.log('\n=== T17 シフト表の取り込み ===');
+const shiftDate = run(`addDays_(todayStr_(),-12)`);
+const shiftMonth = shiftDate.substring(0, 7);
+const shiftDay = Number(shiftDate.substring(8, 10));
+const shiftText = [shiftMonth,
+  `${Number(shiftMonth.substring(5))}/${shiftDay} 清水 夜勤 服部俊喜`,
+  `${Number(shiftMonth.substring(5))}/${shiftDay} 玉里 日勤 藤原寛`,
+  '8/99 清水 夜勤 服部俊喜',
+  `${Number(shiftMonth.substring(5))}/${shiftDay} 清水 夜勤 存在しない人`,
+  'これは説明の行です'].join('\n');
+const shiftRes = run(`importShiftText(${JSON.stringify(shiftText)})`);
+check('シフト表を読み取ってS11に入る', shiftRes.追加 === 2, shiftRes);
+check('読めなかった行は捨てずに理由を返す',
+  shiftRes.読めなかった行.length === 3
+    && shiftRes.読めなかった行.some(l => l.indexOf('存在しない人') >= 0), shiftRes.読めなかった行);
+check('同じ行を入れ直しても二重にならない',
+  run(`importShiftText(${JSON.stringify(shiftText)})`).追加 === 0);
+check('日付・拠点・勤務区分・staff_idが入る',
+  rows('SHIFT_PLAN').some(r => toStr(r.日付) === shiftDate && r.staff_id === 'STF002'
+    && r.拠点 === '清水' && String(r.勤務区分).indexOf('夜勤') >= 0), rows('SHIFT_PLAN'));
+
+// シフト表があれば、その日の夜勤担当者は聞かずに記録される
+run(`(function(){
+  var u=findRow(SHEETS.USER,{'user_code':'TEST01'});updateRow(SHEETS.USER,u._row,{'有効':true,'拠点':'清水'});
+  var c=checkById_('CHK100');updateRow(SHEETS.CHECK,c._row,{'有効':true});checkById_._map=null;
+})()`);
+run(`runAutoFill('${shiftDate}')`);
+check('夜勤担当者がシフト表から記録される',
+  rows('LOG_IMPORT').some(l => toStr(l.発生日) === shiftDate && l.項目名 === '夜勤担当者'
+    && String(l.値) === '服部俊喜' && l.取込元 === 'shift-table'),
+  rows('LOG_IMPORT').filter(l => l.項目名 === '夜勤担当者').slice(-2));
+check('シフト表由来は推測ではなく確定として扱う',
+  rows('LOG_IMPORT').some(l => toStr(l.発生日) === shiftDate && l.項目名 === '夜勤担当者' && l.確度 === '確定'));
+check('その日の夜勤担当者はもう聞かれない',
+  !run(`detectGaps('${shiftDate}',['R05'])`).some(g => g.対象 === '清水'),
+  run(`detectGaps('${shiftDate}',['R05'])`));
+check('記録には支援担当者の名前が残る（監査で問われるのはここ）',
+  run(`nightStaffNameOf_('${shiftDate}','清水')`) === '服部俊喜');
+
+// 社員はLINEからも貼り付けられる
+replies.length = 0;
+post([{ type: 'message', webhookEventId: 'e95', source: { userId: 'U_FUJI' }, message: { type: 'text', text: 'シフト' }, replyToken: 'r95' }]);
+check('「シフト」で貼り付けを促す',
+  JSON.stringify(replies[0] || '').indexOf('シフト表を貼り付けて') > 0, replies[0]);
+replies.length = 0;
+post([{ type: 'message', webhookEventId: 'e96', source: { userId: 'U_FUJI' },
+  message: { type: 'text', text: shiftMonth + '\n' + Number(shiftMonth.substring(5)) + '/' + (shiftDay + 1) + ' 清水 夜勤 服部俊喜' }, replyToken: 'r96' }]);
+check('貼り付けた内容が取り込まれ、結果が返る',
+  JSON.stringify(replies[0] || '').indexOf('取り込みました') > 0, replies[0]);
+replies.length = 0;
+post([{ type: 'message', webhookEventId: 'e97', source: { userId: 'U_NIGHT' }, message: { type: 'text', text: 'シフト' }, replyToken: 'r97' }]);
+check('夜勤はシフト表を取り込めない',
+  JSON.stringify(replies[0] || '').indexOf('社員のみ') > 0, replies[0]);
 
 console.log('\n=== T13 記録の食い違い ===');
 const conDate = run(`addDays_(todayStr_(),-7)`);

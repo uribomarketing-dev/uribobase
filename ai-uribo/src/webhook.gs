@@ -419,6 +419,12 @@ function onTextBody_(staff, userId, text, replyToken, proc) {
       saveSummary_(staff, text, replyToken);
       return;
     }
+    // 「シフト」コマンドの本文待ち
+    if (cache.get('shift_' + userId)) {
+      cache.remove('shift_' + userId);
+      saveShift_(staff, text, replyToken);
+      return;
+    }
     // 回答への一言追記
     if (handleNote_(staff, text, replyToken)) return;
 
@@ -433,6 +439,17 @@ function onTextBody_(staff, userId, text, replyToken, proc) {
         cache.put('summary_' + userId, '1', 900);
         replyRaw_(replyToken, [msgText_('SwitchBotの「AIまとめ」の本文を、そのまま貼り付けて送ってください。\n'
           + '先頭に日付（例：8/11）を書くとその日の記録になります。書かなければ昨日として扱います。')]);
+        return;
+      case 'シフト':
+        if (!isOfficeStaff_(staff)) {
+          replyRaw_(replyToken, [msgText_('このコマンドは社員のみ実行できます。')]);
+          return;
+        }
+        cache.put('shift_' + userId, '1', 900);
+        replyRaw_(replyToken, [msgText_('シフト表を貼り付けて送ってください。\n'
+          + '1行に「日付 拠点 勤務区分 氏名」を空白区切りで。\n'
+          + '例）8/1 清水 夜勤 服部俊喜\n'
+          + '先頭に「2026-08」と書くと、その年月として読みます。')]);
         return;
       case '精査':
         if (!isOfficeStaff_(staff)) {
@@ -500,6 +517,7 @@ var HELP_TEXT_ = 'AI Uriboの使い方\n'
   + '・「精査」…（社員のみ）データから推定して埋めた記録の一覧を返します\n'
   + '・「精度」…（社員のみ）自動データがどれくらい当たっているかを返します\n'
   + '・「まとめ」…（社員のみ）SwitchBotのAIまとめを貼り付けると記録に取り込みます\n'
+  + '・「シフト」…（社員のみ）シフト表を貼り付けると、夜勤担当者を毎日聞かなくなります\n'
   + '答えられないときは無理をせず「わからない」で大丈夫です。社員が引き取ります。';
 
 /**
@@ -582,6 +600,21 @@ function saveSummary_(staff, text, replyToken) {
   lines.push('内容は「精査」と送ると確認できます。');
   replyRaw_(replyToken, [msgText_(lines.join('\n'))]);
   logInfo(proc, staff['氏名'] + ' がAIまとめを取り込み（' + date + '・' + auto.filled + '件反映）');
+}
+
+/**
+ * 貼り付けられたシフト表を取り込む。
+ * @param {Object} staff 送信したスタッフのS1行
+ * @param {string} text 貼り付け本文
+ * @param {string} replyToken 返信トークン
+ * @return {void}
+ */
+function saveShift_(staff, text, replyToken) {
+  var proc = 'saveShift_';
+  var r = importShiftText(text);
+  replyRaw_(replyToken, [msgText_(shiftResultText_(r))]);
+  logInfo(proc, staff['氏名'] + ' がシフト表を取り込み（追加' + r.追加 + '件・更新' + r.更新
+    + '件・読めなかった行' + r.読めなかった行.length + '件）');
 }
 
 /**

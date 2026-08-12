@@ -237,6 +237,10 @@ function runAutoFillBody_(proc, targetDate) {
     if (isTrue_(u['有効'])) activeCodes.push(String(u['user_code']));
   });
 
+  // シフト表に夜勤の予定があれば、その日の夜勤担当者を先に記録しておく
+  // （決まっていることを毎日聞かないため。記録には担当者名が残る）
+  safely_(proc, function () { fillNightStaffFromShift_(date); });
+
   var logs = findRows(SHEETS.LOG_IMPORT, function (r) { return toDateStr_(r['発生日']) === date; });
 
   // すでにある支援記録ログ（対象＋項目名）を索引化して二重書き込みを防ぐ
