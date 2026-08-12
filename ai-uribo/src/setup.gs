@@ -224,7 +224,9 @@ function quickStart() {
   lines.push('3. ウェブアプリとしてデプロイし、URLの末尾に ?k=＜WEBHOOK_SECRET＞ を付けてLINEに登録');
   lines.push('4. S1の登録コードを本人に伝え、LINEで送ってもらう');
   lines.push('5. installTriggers() を実行');
-  lines.push('6. テストが済んだら S8設定の test_mode を FALSE にする（これで本番運用開始）');
+  lines.push('6. メニュー「利用者を登録する」で利用者を登録し、'
+    + '「支援記録の質問を開始する（Phase2）」を実行');
+  lines.push('7. テストが済んだら S8設定の test_mode を FALSE にする（これで本番運用開始）');
   var text = lines.join('\n');
   logInfo(proc, '実行しました');
   return text;
@@ -262,6 +264,17 @@ function checkSetup() {
   var staff = findRows(SHEETS.STAFF, function (r) { return isTrue_(r['有効']); });
   var linked = staff.filter(function (r) { return String(r['line_user_id'] || '').trim(); });
   out.push('有効スタッフ ' + staff.length + '名 / LINE紐付け済み ' + linked.length + '名');
+  var users = safely_('checkSetup', function () {
+    return findRows(SHEETS.USER, function (r) { return isTrue_(r['有効']); }).length;
+  }, 0);
+  var supportOn = safely_('checkSetup', function () {
+    return findRows(SHEETS.CHECK, function (r) {
+      return String(r['対象種別']) === 'support' && isTrue_(r['有効']);
+    }).length;
+  }, 0);
+  out.push('有効な利用者 ' + users + '名'
+    + (users ? '' : '【メニュー「利用者を登録する」から登録してください】'));
+  out.push('支援記録の質問 ' + (supportOn ? supportOn + '項目が有効' : '未開始【メニュー「支援記録の質問を開始する（Phase2）」】'));
   var triggers = ScriptApp.getProjectTriggers().map(function (t) { return t.getHandlerFunction(); });
   ['morningBatch', 'nightBatch', 'weeklyDigest', 'dailyBackup', 'flushQueue'].forEach(function (f) {
     out.push((triggers.indexOf(f) >= 0 ? '○ ' : '× ') + 'トリガー ' + f);
@@ -281,6 +294,11 @@ function onOpen() {
     .addItem('台帳を初期化する（initSheets）', 'initSheets')
     .addItem('セットアップ点検', 'menuCheckSetup_')
     .addItem('登録コードを発行', 'menuIssueCode_')
+    .addSeparator()
+    .addItem('利用者を登録する', 'menuAddUser_')
+    .addItem('登録済みの利用者を見る', 'menuListUsers_')
+    .addItem('支援記録の質問を開始する（Phase2）', 'menuEnablePhase2_')
+    .addSeparator()
     .addItem('診断情報をコピー', 'menuDiagnostics_')
     .addSeparator()
     .addItem('朝バッチを今すぐ実行', 'morningBatch')

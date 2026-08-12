@@ -192,7 +192,7 @@ function mockFolder(name) {
 function iter(arr) { let i = 0; return { hasNext: () => i < arr.length, next: () => arr[i++] }; }
 
 vm.createContext(sandbox);
-['config', 'db', 'log', 'notify', 'setup', 'learn', 'autofill', 'detect', 'ask', 'batch', 'webhook', 'backup', 'diagnose', 'switchbot', 'selfcheck'].forEach(f => {
+['config', 'db', 'log', 'notify', 'setup', 'learn', 'autofill', 'detect', 'ask', 'batch', 'webhook', 'backup', 'diagnose', 'switchbot', 'selfcheck', 'users'].forEach(f => {
   vm.runInContext(fs.readFileSync(path.join(SRC, f + '.gs'), 'utf8'), sandbox, { filename: f + '.gs' });
 });
 
@@ -216,6 +216,45 @@ check('S3のCHK101は無効', run(`String(checkById_('CHK101')['有効'])`) === 
 check('S8にmorning_batch_hour=10', run(`getSetting('morning_batch_hour')`) === '10');
 run('initSheets()');
 check('再実行しても増えない（冪等）', rows('STAFF').length === 4 && book.sheets.length === 13);
+
+console.log('\n=== T1b 利用者の登録と支援記録の開始 ===');
+check('利用者が居ないうちは支援記録を始めない',
+  String(run('enablePhase2()')).indexOf('先に') > 0, run('enablePhase2()'));
+const addRes = run(`addUser('清水','山田テスト')`);
+check('利用者を登録できる（コードは自動採番）',
+  rows('USER').some(u => u.user_code === 'U001' && u.拠点 === '清水' && isTrueLike(u.有効)), addRes);
+check('氏名は台帳本体に出ず、S9対応表にだけ入る',
+  rows('NAME_MAP').some(r => r.コード === 'U001' && r.氏名 === '山田テスト')
+    && !rows('USER').some(u => JSON.stringify(u).indexOf('山田テスト') >= 0),
+  rows('USER'));
+check('LINEの文面では氏名に置き換わる', run(`displayName_('U001')`) === '山田テスト');
+run(`addUser('玉里','鈴木テスト')`);
+check('2人目は別のコードになる', rows('USER').some(u => u.user_code === 'U002' && u.拠点 === '玉里'));
+check('同じコードで登録し直しても増えない',
+  (run(`addUser('清水','山田テスト','U001')`), rows('USER').filter(u => u.user_code === 'U001').length === 1));
+
+const phase2 = run('enablePhase2()');
+check('利用者を登録すると支援記録の質問を開始できる',
+  String(phase2).indexOf('開始しました') > 0, phase2);
+check('優先度Aの支援記録が有効になる',
+  ['CHK101', 'CHK105', 'CHK106'].every(id => String(run(`String(checkById_('${id}')['有効'])`)) === 'true'));
+check('優先度Bはまだ有効にしない（まずAだけ）',
+  String(run(`String(checkById_('CHK111')['有効'])`)) === 'false');
+check('検出対象外の項目は有効にしない',
+  String(run(`String(checkById_('CHK107')['有効'])`)) === 'false');
+check('セットアップ点検に利用者数と開始状況が出る',
+  String(run('checkSetup()')).indexOf('有効な利用者 2名') > 0
+    && String(run('checkSetup()')).indexOf('項目が有効') > 0);
+// 質問が多すぎたときにすぐ静かにできること（逃げ道）
+run('disablePhase2()');
+check('支援記録の質問はいつでも止められる',
+  String(run(`String(checkById_('CHK101')['有効'])`)) === 'false');
+check('止めてもシフト希望の確認は続く',
+  String(run(`String(checkById_('CHK001')['有効'])`)) === 'true');
+// 以降のテストは元の状態（支援記録は無効）で続ける
+run(`(function(){
+  findRows(SHEETS.USER).forEach(function(u){updateRow(SHEETS.USER,u._row,{'有効':false});});
+})()`);
 
 console.log('\n=== T2 登録コードによる本人確認と紐付け ===');
 props.LINE_CHANNEL_TOKEN = 'dummy-token';

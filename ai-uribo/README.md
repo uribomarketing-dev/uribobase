@@ -35,7 +35,7 @@ AI Uriboは**記録を正しく作る装置ではなく、記録者と利用者�
 
 - 仕様の正：01〜08の仕様書キット。**【08】v1.1が最新の確定仕様**（矛盾する箇所は【08】を優先）
 - 実装ステータス：Step1〜Step5のコード実装完了
-- 検証ステータス：**ローカル自動テスト146項目すべてOK**（`docs/テスト結果報告.md`）。
+- 検証ステータス：**ローカル自動テスト159項目すべてOK**（`docs/テスト結果報告.md`）。
   別AIレビュー第1回（技術面）の指摘13件は全件対応済み（`docs/レビュー対応ログ.md`）。
   運用・監査観点のレビューも実施し、質問文・選択肢を改善（`docs/運用監査レビュー.md`）。
   実機での動作確認（LINE表示・Webhook・Drive・トリガー発火）は `docs/テスト手順書.md` で人間が実施
@@ -68,6 +68,7 @@ ai-uribo/
 │   ├── setup.gs                  initSheets() 台帳初期化・メニュー
 │   ├── autofill.gs               自動充足（機械で埋められるものは人に聞かない／合図は質問に添える）
 │   ├── learn.gs                  学習（推定と回答を突き合わせ、当たる項目の質問をやめる）
+│   ├── users.gs                  利用者の登録（氏名はS9のみ）と支援記録の開始・停止
 │   ├── selfcheck.gs              自己点検と自動整理（トリガー再設定・古い行の保管）
 │   ├── detect.gs                 detectGaps() 不足検出（AI化の差し替えポイント）
 │   ├── ask.gs                    確認セットの組み立てと回答処理
@@ -77,7 +78,7 @@ ai-uribo/
 │   ├── switchbot.gs              SwitchBot Open API連携（機器読込・毎朝の状態取得・Webhook受信）
 │   └── backup.gs                 第1バックアップ（Drive・毎日3:00）
 ├── tests/
-│   └── harness.js                GAS APIをモックしたローカル自動テスト（node harness.js で146項目を検証）
+│   └── harness.js                GAS APIをモックしたローカル自動テスト（node harness.js で159項目を検証）
 ├── tools/
 │   └── make_review_bundle.sh     別AIレビュー用に全ソースを1ファイルにまとめる（review_bundle.md を生成）
 ├── homeassistant/                玉里のAIハブ連携（Frigateの検知をAI Uriboへ自動送信）
