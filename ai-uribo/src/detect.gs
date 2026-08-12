@@ -156,6 +156,17 @@ function ruleR04_(targetDate, check) {
  */
 function registerGaps(gaps) {
   var proc = 'registerGaps';
+  // 重複確認と追記の間に他の実行が割り込まないよう直列化する（再入可能）
+  return withLock_(proc, 120000, function () { return registerGapsBody_(proc, gaps); }, function () { return []; });
+}
+
+/**
+ * 不足登録の本体（ロック取得済みの状態で呼ばれる）。
+ * @param {string} proc ログ用の処理名
+ * @param {Array.<Object>} gaps detectGapsの戻り値
+ * @return {Array.<Object>} 新規登録した不足の配列
+ */
+function registerGapsBody_(proc, gaps) {
   var existing = {};
   findRows(SHEETS.GAP).forEach(function (r) {
     existing[toDateStr_(r['対象日']) + '\t' + r['check_id'] + '\t' + r['対象']] = true;

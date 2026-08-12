@@ -32,8 +32,8 @@ var SHEETS = {
 var SHEET_DEFS = [
   {
     name: SHEETS.STAFF,
-    headers: ['staff_id', '氏名', 'line_user_id', '役割', '拠点', 'エスカレーション先フラグ', '有効'],
-    note: 'スタッフマスタ。line_user_idは友だち追加時に自動記録される'
+    headers: ['staff_id', '氏名', 'line_user_id', '役割', '拠点', 'エスカレーション先フラグ', '有効', '登録コード'],
+    note: 'スタッフマスタ。登録コードを本人に個別に伝え、LINEで送ってもらうことで紐付ける（なりすまし防止）'
   },
   {
     name: SHEETS.USER,
@@ -58,13 +58,14 @@ var SHEET_DEFS = [
   {
     name: SHEETS.TASK,
     headers: ['task_id', 'gap_id', '送信先staff_id', '送信日時', '回答', '回答日時', '回答方法',
-              '送信本文', '送信状態', '再送回数', '追記待ち', 'セットid', '並び順'],
-    note: '確認タスク・回答ログ兼LINE送信キュー。送信状態＝待機/キュー/送信済/失敗/中止'
+              '送信本文', '送信状態', '再送回数', '追記待ち', 'セットid', '並び順', 'retry_key', '作成日時'],
+    note: '確認タスク・回答ログ兼LINE送信キュー。送信状態＝待機/キュー/送信済/失敗/中止。'
+        + 'retry_keyはLINEの重複送信防止キー（同じ内容の再送では必ず同じ値を使う）'
   },
   {
     name: SHEETS.FILL,
-    headers: ['fill_id', '対象日', '対象', '項目名', '値', '記入者staff_id', '取込済フラグ', '作成日時'],
-    note: '補完台帳。既存アプリはここを読んで自分のDBに取り込む'
+    headers: ['fill_id', '対象日', '対象', '項目名', '値', '記入者staff_id', '取込済フラグ', '作成日時', 'gap_id'],
+    note: '補完台帳。既存アプリはここを読んで自分のDBに取り込む。gap_idは二重記録の防止に使う'
   },
   {
     name: SHEETS.SETTING,
@@ -109,7 +110,9 @@ var DEFAULT_SETTINGS = [
   ['backup_folder_name', 'AI_Uribo_Backup', 'バックアップ先フォルダ名'],
   ['line_retry_max', '3', 'LINE送信のリトライ回数'],
   ['digest_lookback_days', '7', '週次ダイジェストの集計対象日数'],
-  ['stale_hours', '8', '確認中のまま何時間経過したら滞留とみなすか']
+  ['stale_hours', '8', '確認中のまま何時間経過したら滞留とみなすか'],
+  ['queue_expire_hours', '24', 'キュー・失敗分をこの時間を過ぎたら再送しない（LINEの重複防止キーの有効期間に合わせる）'],
+  ['register_attempt_limit', '10', '登録コードの入力を1時間に何回まで許すか']
 ];
 
 /**
@@ -118,11 +121,17 @@ var DEFAULT_SETTINGS = [
  * @type {Array.<Array.<string|boolean>>}
  */
 var INITIAL_STAFF = [
-  ['STF001', '藤原寛', '', '社員', '本部', true, true],
-  ['STF002', '服部俊喜', '', '社員', '清水', true, true],
-  ['STF003', '岐部紀美代', '', '社員', '本部', false, false],
-  ['STF004', '兼崎', '', '管理者', '本部', true, true]
+  ['STF001', '藤原寛', '', '社員', '本部', true, true, ''],
+  ['STF002', '服部俊喜', '', '社員', '清水', true, true, ''],
+  ['STF003', '岐部紀美代', '', '社員', '本部', false, false, ''],
+  ['STF004', '兼崎', '', '管理者', '本部', true, true, '']
 ];
+
+/** 登録コードに使う文字（見間違えやすい 0/O/1/I/l を除く） @type {string} */
+var REGISTRATION_CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+
+/** 登録コードの桁数 @type {number} */
+var REGISTRATION_CODE_LENGTH = 8;
 
 /**
  * S3チェック項目マスタの初期データ。

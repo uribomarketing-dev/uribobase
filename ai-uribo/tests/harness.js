@@ -128,7 +128,13 @@ const sandbox = {
       remove: k => { delete cache[k]; }
     })
   },
-  LockService: { getScriptLock: () => ({ tryLock: () => true, releaseLock: () => { } }) },
+  // ロックは「他の処理が実行中」を再現できるようにしておく（競合時の挙動を検証するため）
+  LockService: {
+    getScriptLock: () => ({
+      tryLock: () => !sandbox.__lockBusy,
+      releaseLock: () => { sandbox.__lockReleased = (sandbox.__lockReleased || 0) + 1; }
+    })
+  },
   ScriptApp: {
     getProjectTriggers: () => [],
     deleteTrigger: () => { },
@@ -154,7 +160,8 @@ const sandbox = {
     getFileById: () => ({ makeCopy: () => ({}) })
   },
   Session: { getScriptTimeZone: () => 'Asia/Tokyo' },
-  __triggers: []
+  __triggers: [],
+  __lockBusy: false
 };
 function mockFolder(name) {
   const folders = {}, files = {};
@@ -195,17 +202,44 @@ check('S8にmorning_batch_hour=10', run(`getSetting('morning_batch_hour')`) === 
 run('initSheets()');
 check('再実行しても増えない（冪等）', rows('STAFF').length === 4 && book.sheets.length === 11);
 
-console.log('\n=== T2 友だち追加とline_user_id記録 ===');
+console.log('\n=== T2 登録コードによる本人確認と紐付け ===');
 props.LINE_CHANNEL_TOKEN = 'dummy-token';
+const post = (events, key = 'k123') => run(`doPost(${JSON.stringify({ parameter: { k: '__KEY__' }, postData: { contents: JSON.stringify({ events }) } })})`.replace('__KEY__', key));
+
+// 秘密キー未設定なら全拒否（fail-close）
+replies.length = 0;
+post([{ type: 'follow', webhookEventId: 'e0', source: { userId: 'U_FUJI' }, replyToken: 'r0' }]);
+check('WEBHOOK_SECRET未設定なら全リクエストを拒否', replies.length === 0);
 props.WEBHOOK_SECRET = 'k123';
-const post = (events) => run(`doPost(${JSON.stringify({ parameter: { k: 'k123' }, postData: { contents: JSON.stringify({ events }) } })})`);
+
+const codes = {};
+rows('STAFF').forEach(s => { codes[s.staff_id] = String(s.登録コード); });
+check('登録コードが自動発行されている', /^[A-Z2-9]{8}$/.test(codes.STF001), codes);
+
+replies.length = 0;
 post([{ type: 'follow', webhookEventId: 'e1', source: { userId: 'U_FUJI' }, replyToken: 'r1' }]);
-check('名前確認のクイックリプライ', JSON.stringify(replies[0]).indexOf('お名前を教えてください') > 0);
-post([{ type: 'postback', webhookEventId: 'e2', source: { userId: 'U_FUJI' }, postback: { data: 'iam|STF001' }, replyToken: 'r2' }]);
-post([{ type: 'postback', webhookEventId: 'e3', source: { userId: 'U_HATT' }, postback: { data: 'iam|STF002' }, replyToken: 'r3' }]);
+check('友だち追加で登録コードを求める', JSON.stringify(replies[0]).indexOf('登録コード') > 0, replies[0]);
+check('スタッフ氏名の一覧は出さない', JSON.stringify(replies[0]).indexOf('藤原') < 0, replies[0]);
+
+replies.length = 0;
+post([{ type: 'message', webhookEventId: 'e1b', source: { userId: 'U_BAD' }, message: { type: 'text', text: 'ZZZZZZZZ' }, replyToken: 'r1b' }]);
+check('でたらめなコードでは登録できない', rows('STAFF').every(s => !String(s.line_user_id).trim()));
+check('コード不一致を案内する', JSON.stringify(replies[0]).indexOf('確認できませんでした') > 0, replies[0]);
+
+post([{ type: 'message', webhookEventId: 'e2', source: { userId: 'U_FUJI' }, message: { type: 'text', text: codes.STF001 }, replyToken: 'r2' }]);
+post([{ type: 'message', webhookEventId: 'e3', source: { userId: 'U_HATT' }, message: { type: 'text', text: codes.STF002 }, replyToken: 'r3' }]);
 const staff = rows('STAFF');
 check('藤原にline_user_id', staff[0].line_user_id === 'U_FUJI', staff[0]);
 check('服部にline_user_id', staff[1].line_user_id === 'U_HATT', staff[1]);
+check('使用済みコードは消える', !String(staff[0].登録コード).trim(), staff[0]);
+
+replies.length = 0;
+post([{ type: 'message', webhookEventId: 'e3b', source: { userId: 'U_EVIL' }, message: { type: 'text', text: codes.STF001 }, replyToken: 'r3b' }]);
+check('使用済みコードで乗っ取れない', rows('STAFF')[0].line_user_id === 'U_FUJI');
+
+replies.length = 0;
+post([{ type: 'message', webhookEventId: 'e3c', source: { userId: 'U_KIBE' }, message: { type: 'text', text: codes.STF003 }, replyToken: 'r3c' }]);
+check('無効スタッフのコードでは登録できない', rows('STAFF')[2].line_user_id === '' , rows('STAFF')[2]);
 
 console.log('\n=== T3 朝バッチ（シフト希望） ===');
 const today = run('todayStr_()');
@@ -337,16 +371,79 @@ post([{ type: 'postback', webhookEventId: 'e13', source: { userId: 'U_FUJI' }, p
 check('回答済みタスクの再回答を弾く', JSON.stringify(replies[0]).indexOf('すでに回答済み') > 0, replies[0]);
 replies.length = 0;
 post([{ type: 'message', webhookEventId: 'e14', source: { userId: 'U_UNKNOWN' }, message: { type: 'text', text: 'こんにちは' }, replyToken: 'r14' }]);
-check('未登録ユーザーは操作を受け付けない', JSON.stringify(replies[0]).indexOf('管理者の登録をお待ちください') > 0);
+check('未登録ユーザーは操作を受け付けない', JSON.stringify(replies[0]).indexOf('登録コード') > 0, replies[0]);
 const before = replies.length;
 run(`doPost(${JSON.stringify({ parameter: { k: 'wrong' }, postData: { contents: JSON.stringify({ events: [{ type: 'message', webhookEventId: 'e15', source: { userId: 'U_FUJI' }, message: { type: 'text', text: '状況' }, replyToken: 'r15' }] }) } })})`);
 check('秘密キー不一致のリクエストを破棄', replies.length === before);
 post([{ type: 'message', webhookEventId: 'e8', source: { userId: 'U_FUJI' }, message: { type: 'text', text: '状況' }, replyToken: 'r16' }]);
 check('重複イベントIDを無視', replies.length === before);
+
+console.log('\n=== 追加検証（レビュー指摘の再発防止） ===');
+// 1. ロックを取れないときは処理を続けない
+const fillsBeforeBusy = rows('FILL').length;
+const tasksBeforeBusy = rows('TASK').length;
+replies.length = 0;
+sandbox.__lockBusy = true;
+post([{ type: 'message', webhookEventId: 'e30', source: { userId: 'U_FUJI' }, message: { type: 'text', text: '状況' }, replyToken: 'r30' }]);
+check('ロック取得失敗時は処理せず案内する', JSON.stringify(replies[0] || '').indexOf('混み合っています') > 0, replies[0]);
+check('ロック取得失敗時はシートを書き換えない',
+  rows('FILL').length === fillsBeforeBusy && rows('TASK').length === tasksBeforeBusy);
+const busyResult = run('morningBatch()');
+check('バッチもロック未取得ならスキップ', String(busyResult).indexOf('スキップ') >= 0, busyResult);
+sandbox.__lockBusy = false;
+
+// 2. 他人あてのタスクには回答できない
+const othersTask = rows('TASK').find(t => t.送信先staff_id === 'STF002' && t.送信状態 === '送信済' && !String(t.回答 || ''));
+if (othersTask) {
+  replies.length = 0;
+  const fillsBefore2 = rows('FILL').length;
+  post([{ type: 'postback', webhookEventId: 'e31', source: { userId: 'U_FUJI' }, postback: { data: 'ans|' + othersTask.task_id + '|在宅' }, replyToken: 'r31' }]);
+  check('他人あての確認には回答できない', rows('FILL').length === fillsBefore2 &&
+    JSON.stringify(replies[0] || '').indexOf('お答えいただけません') > 0, replies[0]);
+}
+
+// 3. LINEが409（受理済み）を返しても失敗扱いにしない
+const origFetch = sandbox.UrlFetchApp.fetch;
+sandbox.UrlFetchApp.fetch = (url, opts) => ({ getResponseCode: () => 409, getContentText: () => '{"message":"conflict"}' });
+const r409 = run(`pushRaw_('U_FUJI',[{type:'text',text:'x'}],'key-1')`);
+check('409は送信済みとして成功扱い', r409.ok === true && r409.tries === 1, r409);
+sandbox.UrlFetchApp.fetch = origFetch;
+
+// 4. 同じ不足への二重記録をS7側でも防ぐ
+const doneGap = rows('GAP').find(g => g.状態 === '完了');
+if (doneGap) {
+  const fillsBefore3 = rows('FILL').length;
+  run(`recordFill_(findRow(SHEETS.GAP,{'gap_id':'${doneGap.gap_id}'}), checkById_('${doneGap.check_id}'), 'テスト再記録', staffById_('STF001'))`);
+  check('同じgap_idの補完は1回だけ', rows('FILL').length === fillsBefore3, [fillsBefore3, rows('FILL').length]);
+}
+
+// 5. gap_idは1000件を超えても桁落ちしない
+const gapIdOverflow = run(`(function(){
+  appendRow(SHEETS.GAP,{gap_id:'GAP-' + todayStr_().replace(/-/g,'') + '-999', 対象日: todayStr_(), check_id:'CHK001', 対象:'STF001', 状態:'完了'});
+  return nextGapId_(todayStr_());})()`);
+check('gap_idが1000件目でも重複しない', /-1000$/.test(gapIdOverflow), gapIdOverflow);
+
+// 6. 無効化されたスタッフは操作できない
+run(`(function(){var s=staffById_('STF002');updateRow(SHEETS.STAFF,s._row,{'有効':false});})()`);
+replies.length = 0;
+post([{ type: 'message', webhookEventId: 'e32', source: { userId: 'U_HATT' }, message: { type: 'text', text: '状況' }, replyToken: 'r32' }]);
+check('無効スタッフの操作を拒否', JSON.stringify(replies[0] || '').indexOf('利用停止中') > 0, replies[0]);
+run(`(function(){var s=staffById_('STF002');updateRow(SHEETS.STAFF,s._row,{'有効':true});})()`);
+
+// 7. 夜勤スタッフの「状況」は自分の担当分だけ
+run(`(function(){
+  appendRow(SHEETS.STAFF,{staff_id:'STF900',氏名:'テスト夜勤',line_user_id:'U_NIGHT',役割:'夜勤',拠点:'清水',エスカレーション先フラグ:false,有効:true});})()`);
+replies.length = 0;
+post([{ type: 'message', webhookEventId: 'e33', source: { userId: 'U_NIGHT' }, message: { type: 'text', text: '状況' }, replyToken: 'r33' }]);
+check('夜勤には自分の担当分だけ表示', JSON.stringify(replies[0] || '').indexOf('あなたの未完了：0件') > 0, replies[0]);
+
 run('installTriggers()');
 check('トリガー5件を登録', sandbox.__triggers.length === 5, sandbox.__triggers);
-check('S10にエラーが1件も無い', !rows('RUN_LOG').some(r => r.結果 === 'エラー'),
-  rows('RUN_LOG').filter(r => r.結果 === 'エラー').map(r => r.処理名 + ': ' + r.詳細));
+// 「WEBHOOK_SECRET未設定なので拒否した」は、fail-closeの検証で意図的に出したエラー
+const unexpectedErrors = rows('RUN_LOG').filter(r => r.結果 === 'エラー' &&
+  String(r.詳細).indexOf('WEBHOOK_SECRET が未設定') < 0);
+check('想定外のエラーがS10に無い', unexpectedErrors.length === 0,
+  unexpectedErrors.map(r => r.処理名 + ': ' + r.詳細));
 
 console.log('\n================ 結果: ' + (failures ? failures + '件 NG' : 'すべてOK') + ' ================\n');
 process.exit(failures ? 1 : 0);

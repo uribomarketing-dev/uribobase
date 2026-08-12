@@ -16,6 +16,17 @@
  */
 function dailyBackup() {
   var proc = 'dailyBackup';
+  // 書き込みの途中でCSVを吐くと中途半端な状態が残るため、他の処理と直列化する
+  return withLock_(proc, 120000, function () { return dailyBackupBody_(proc); },
+    function () { return '他の処理が実行中のためスキップ'; });
+}
+
+/**
+ * 日次バックアップの本体（ロック取得済みの状態で呼ばれる）。
+ * @param {string} proc ログ用の処理名
+ * @return {string} 実行サマリ
+ */
+function dailyBackupBody_(proc) {
   logStart(proc);
   var today = todayStr_();
   try {

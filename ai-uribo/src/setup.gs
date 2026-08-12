@@ -63,6 +63,7 @@ function ensureSheet_(book, def, created, skipped) {
     sh.deleteColumns(def.headers.length + 1, sh.getMaxColumns() - def.headers.length);
   }
   created.push(def.name);
+  invalidateCache_(def.name);
   return sh;
 }
 
@@ -85,9 +86,51 @@ function removeDefaultSheet_(book) {
 function seedStaff_() {
   if (findRows(SHEETS.STAFF).length > 0) return false;
   var sh = sheet_(SHEETS.STAFF);
-  sh.getRange(2, 1, INITIAL_STAFF.length, INITIAL_STAFF[0].length).setValues(INITIAL_STAFF);
+  var values = INITIAL_STAFF.map(function (row) {
+    var copy = row.slice();
+    copy[7] = makeRegistrationCode_();   // 登録コードを自動発行
+    return copy;
+  });
+  sh.getRange(2, 1, values.length, values[0].length).setValues(values);
   sh.getRange(2, 4).setNote('兼崎様のフルネームは友だち追加時に確認して氏名列を更新すること');
+  sh.getRange(1, 8).setNote('本人にだけ個別に伝えるコード。LINEでこのコードを送ってもらうと紐付く。'
+    + '紐付いたら自動で消える。再発行はメニュー「AI Uribo」→「登録コードを発行」から');
+  invalidateCache_(SHEETS.STAFF);
   return true;
+}
+
+/**
+ * 登録コードを（再）発行する。メニューから実行し、表示されたコードを本人にだけ伝える。
+ * すでにLINEと紐付いているスタッフに発行すると、紐付けを解除して付け直しになる。
+ * @param {string} [staffId] staff_id（省略時はダイアログで入力）
+ * @return {string} 発行結果のメッセージ
+ */
+function issueRegistrationCode(staffId) {
+  var proc = 'issueRegistrationCode';
+  return withLock_(proc, 20000, function () {
+    var staff = staffId ? staffById_(staffId) : null;
+    if (!staff) {
+      var msg = 'staff_idが見つかりません: ' + staffId;
+      logWarn(proc, msg);
+      return msg;
+    }
+    var code = makeRegistrationCode_();
+    updateRow(SHEETS.STAFF, staff._row, { '登録コード': code, 'line_user_id': '' });
+    logInfo(proc, staff['氏名'] + ' の登録コードを再発行（コード自体はログに残さない）');
+    return staff['氏名'] + ' さんの登録コード：' + code
+      + '\n※本人にだけ伝えてください。LINEでこのコードを送ると登録されます。';
+  });
+}
+
+/**
+ * メニューから登録コードを発行する。
+ * @return {void}
+ */
+function menuIssueCode_() {
+  var ui = SpreadsheetApp.getUi();
+  var res = ui.prompt('登録コードの発行', 'staff_id を入力してください（例：STF001）', ui.ButtonSet.OK_CANCEL);
+  if (res.getSelectedButton() !== ui.Button.OK) return;
+  ui.alert('登録コード', issueRegistrationCode(String(res.getResponseText()).trim()), ui.ButtonSet.OK);
 }
 
 /**
@@ -98,6 +141,7 @@ function seedChecks_() {
   if (findRows(SHEETS.CHECK).length > 0) return false;
   var sh = sheet_(SHEETS.CHECK);
   sh.getRange(2, 1, INITIAL_CHECKS.length, INITIAL_CHECKS[0].length).setValues(INITIAL_CHECKS);
+  invalidateCache_(SHEETS.CHECK);
   return true;
 }
 
@@ -112,6 +156,7 @@ function seedSettings_() {
   if (!add.length) return false;
   var sh = sheet_(SHEETS.SETTING);
   sh.getRange(sh.getLastRow() + 1, 1, add.length, 3).setValues(add);
+  invalidateCache_(SHEETS.SETTING);
   clearSettingCache();
   return true;
 }
@@ -129,7 +174,12 @@ function checkSetup() {
   });
   out.push((props.getProperty(PROP.TOKEN) ? '○ ' : '× ') + 'スクリプトプロパティ ' + PROP.TOKEN);
   out.push((props.getProperty(PROP.SECRET) ? '○ ' : '× ') + 'スクリプトプロパティ ' + PROP.SECRET);
-  out.push((props.getProperty(PROP.WEBHOOK_KEY) ? '○ ' : '× ') + 'スクリプトプロパティ ' + PROP.WEBHOOK_KEY);
+  if (props.getProperty(PROP.WEBHOOK_KEY)) {
+    out.push('○ スクリプトプロパティ ' + PROP.WEBHOOK_KEY);
+  } else {
+    out.push('× スクリプトプロパティ ' + PROP.WEBHOOK_KEY
+      + ' 【未設定のためWebhookは全リクエストを拒否します。運用開始前に必ず設定してください】');
+  }
   var staff = findRows(SHEETS.STAFF, function (r) { return isTrue_(r['有効']); });
   var linked = staff.filter(function (r) { return String(r['line_user_id'] || '').trim(); });
   out.push('有効スタッフ ' + staff.length + '名 / LINE紐付け済み ' + linked.length + '名');
@@ -150,6 +200,7 @@ function onOpen() {
   SpreadsheetApp.getUi().createMenu('AI Uribo')
     .addItem('台帳を初期化する（initSheets）', 'initSheets')
     .addItem('セットアップ点検', 'menuCheckSetup_')
+    .addItem('登録コードを発行', 'menuIssueCode_')
     .addSeparator()
     .addItem('朝バッチを今すぐ実行', 'morningBatch')
     .addItem('夜の確認セットを今すぐ実行', 'nightBatch')

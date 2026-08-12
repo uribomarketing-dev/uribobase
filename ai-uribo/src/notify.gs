@@ -61,6 +61,12 @@ function pushRaw_(lineUserId, messages, retryKey) {
       last.code = r.code;
       last.body = r.body;
       if (r.code === 200) { last.ok = true; return last; }
+      // 409 は「同じリトライキーの送信を既に受理済み」の意味。成功として扱う（重複送信の防止）
+      if (r.code === 409) {
+        last.ok = true;
+        logInfo('pushRaw_', '409（送信済み）として扱う: ' + lineUserId);
+        return last;
+      }
       // 4xx（トークン不正・宛先不正など）はリトライしても直らないので即終了
       if (r.code >= 400 && r.code < 500 && r.code !== 429) return last;
     } catch (e) {
@@ -154,30 +160,43 @@ function sendToStaff(staffId, messages, opts) {
 
   var body = JSON.stringify(messages);
 
+  // 同じ内容の再送では必ず同じキーを使う（LINE側が重複を弾けるようにするため）
+  var retryKey = opts.retryKey || '';
+  if (!retryKey && opts.taskRowNumber) {
+    var taskRow = findRow(SHEETS.TASK, function (r) { return r._row === opts.taskRowNumber; });
+    retryKey = taskRow ? String(taskRow['retry_key'] || '') : '';
+  }
+  if (!retryKey) retryKey = Utilities.getUuid();
+
   // 深夜帯はキューに積む
   if (!opts.force && isQuietHours_()) {
     if (opts.taskRowNumber) {
-      updateRow(SHEETS.TASK, opts.taskRowNumber, { '送信状態': SEND_STATUS.QUEUED, '送信本文': body });
+      updateRow(SHEETS.TASK, opts.taskRowNumber, {
+        '送信状態': SEND_STATUS.QUEUED, '送信本文': body, 'retry_key': retryKey
+      });
     } else {
       appendRow(SHEETS.TASK, {
         'task_id': nextSeqId_(SHEETS.TASK, 'task_id', 'TSK', 5),
         '送信先staff_id': staffId,
         '送信本文': body,
         '送信状態': SEND_STATUS.QUEUED,
-        '再送回数': 0
+        '再送回数': 0,
+        'retry_key': retryKey,
+        '作成日時': nowStr_()
       });
     }
     logInfo(label, '深夜帯のためキュー保存: ' + staff['氏名']);
     return { ok: true, queued: true, detail: 'queued' };
   }
 
-  var res = pushRaw_(lineId, messages);
+  var res = pushRaw_(lineId, messages, retryKey);
   if (opts.taskRowNumber) {
     updateRow(SHEETS.TASK, opts.taskRowNumber, {
       '送信本文': body,
       '送信状態': res.ok ? SEND_STATUS.SENT : SEND_STATUS.FAILED,
       '送信日時': res.ok ? nowStr_() : '',
-      '再送回数': res.tries
+      '再送回数': res.tries,
+      'retry_key': retryKey
     });
   }
   if (res.ok) {
@@ -212,47 +231,65 @@ function sendToEscalationStaff(messages, label) {
  */
 function flushQueue() {
   var proc = 'flushQueue';
-  logStart(proc);
-  if (isQuietHours_()) {
-    logInfo(proc, '深夜帯のため送信しない');
-    return 0;
-  }
-  var maxRetry = getSettingNum('line_retry_max', 3);
-  var targets = findRows(SHEETS.TASK, function (r) {
-    var st = String(r['送信状態']);
-    if (st === SEND_STATUS.QUEUED) return true;
-    return st === SEND_STATUS.FAILED && Number(r['再送回数'] || 0) < maxRetry * 2;
-  });
-  var sent = 0;
-  targets.forEach(function (t) {
-    safely_(proc, function () {
-      var body = String(t['送信本文'] || '');
-      if (!body) {
-        updateRow(SHEETS.TASK, t._row, { '送信状態': SEND_STATUS.CANCELED });
-        return;
-      }
-      // 対応する不足がすでに完了していれば送らない
-      if (t['gap_id']) {
-        var gap = findRow(SHEETS.GAP, { 'gap_id': t['gap_id'] });
-        if (gap && String(gap['状態']) === GAP_STATUS.DONE) {
+  return withLock_(proc, 60000, function () {
+    logStart(proc);
+    if (isQuietHours_()) {
+      logInfo(proc, '深夜帯のため送信しない');
+      return 0;
+    }
+    var maxRetry = getSettingNum('line_retry_max', 3);
+    var expireMs = getSettingNum('queue_expire_hours', 24) * 3600 * 1000;
+    var now = new Date().getTime();
+
+    var targets = findRows(SHEETS.TASK, function (r) {
+      var st = String(r['送信状態']);
+      if (st === SEND_STATUS.QUEUED) return true;
+      return st === SEND_STATUS.FAILED && Number(r['再送回数'] || 0) < maxRetry * 2;
+    });
+    var sent = 0, expired = 0;
+
+    targets.forEach(function (t) {
+      safely_(proc, function () {
+        var body = String(t['送信本文'] || '');
+        if (!body) {
           updateRow(SHEETS.TASK, t._row, { '送信状態': SEND_STATUS.CANCELED });
           return;
         }
-      }
-      var prevTries = Number(t['再送回数'] || 0);
-      var r = sendToStaff(t['送信先staff_id'], JSON.parse(body), {
-        taskRowNumber: t._row, label: proc, force: false
+        // 作られてから期限（既定24時間）を過ぎたものは再送しない。
+        // LINEの重複防止キーの有効期間を超えると、二重送信になる恐れがあるため。
+        var created = toDateTimeStr_(t['作成日時'] || t['送信日時']);
+        if (created) {
+          var age = now - new Date(created.replace(' ', 'T') + ':00+09:00').getTime();
+          if (!isNaN(age) && age > expireMs) {
+            updateRow(SHEETS.TASK, t._row, { '送信状態': SEND_STATUS.CANCELED });
+            logWarn(proc, '期限切れのため送信を取りやめ: ' + t['task_id']);
+            expired++;
+            return;
+          }
+        }
+        // 対応する不足がすでに完了していれば送らない
+        if (t['gap_id']) {
+          var gap = findRow(SHEETS.GAP, { 'gap_id': t['gap_id'] });
+          if (gap && String(gap['状態']) === GAP_STATUS.DONE) {
+            updateRow(SHEETS.TASK, t._row, { '送信状態': SEND_STATUS.CANCELED });
+            return;
+          }
+        }
+        var prevTries = Number(t['再送回数'] || 0);
+        var r = sendToStaff(t['送信先staff_id'], JSON.parse(body), {
+          taskRowNumber: t._row, label: proc, force: false
+        });
+        if (r.ok && !r.queued) {
+          sent++;
+        } else if (!r.ok) {
+          // 再送回数は累積させる（無限リトライを防ぐため）
+          updateRow(SHEETS.TASK, t._row, { '再送回数': prevTries + 1 });
+        }
       });
-      if (r.ok && !r.queued) {
-        sent++;
-      } else if (!r.ok) {
-        // 再送回数は累積させる（無限リトライを防ぐため）
-        updateRow(SHEETS.TASK, t._row, { '再送回数': prevTries + 1 });
-      }
     });
-  });
-  logInfo(proc, '送信 ' + sent + '件 / 対象 ' + targets.length + '件');
-  return sent;
+    logInfo(proc, '送信 ' + sent + '件 / 対象 ' + targets.length + '件 / 期限切れ ' + expired + '件');
+    return sent;
+  }, function () { return 0; });
 }
 
 // ---------------------------------------------------------------------------

@@ -32,17 +32,24 @@ function createAndSendSet(staffId, gaps, title) {
   });
 
   var intro = msgText_(title + '\n全' + gaps.length + '件です。ボタンで順番にお答えください。');
-  var sent = sendNextInSet_(setId, null, [intro]);
-  logInfo(proc, staffId + ' へ ' + gaps.length + '件の確認セット（' + setId + '）を作成 / 送信=' + sent);
-  return { setId: setId, count: gaps.length, sent: sent };
+  var result = sendNextInSet_(setId, null, [intro]);
+  logInfo(proc, staffId + ' へ ' + gaps.length + '件の確認セット（' + setId + '）を作成 / 送信=' + result);
+  return { setId: setId, count: gaps.length, sent: (result === SEND_RESULT.SENT) };
 }
+
+/**
+ * sendNextInSet_ の戻り値。
+ * SENT=次の質問を送った / NONE=残りが無い / FAILED=送信に失敗した（replyTokenは使用済みの可能性）
+ * @type {Object.<string,string>}
+ */
+var SEND_RESULT = { SENT: 'sent', NONE: 'none', FAILED: 'failed' };
 
 /**
  * セット内の次の未送信タスクを1件送る。
  * @param {string} setId セットid
  * @param {string} [replyToken] 返信トークン（webhookからの応答時に指定）
  * @param {Array.<Object>} [prefixMessages] 質問の前に付けるメッセージ（お礼など）
- * @return {boolean} 質問を送ったらtrue（残りが無ければfalse）
+ * @return {string} SEND_RESULT のいずれか
  */
 function sendNextInSet_(setId, replyToken, prefixMessages) {
   var proc = 'sendNextInSet_';
@@ -68,20 +75,22 @@ function sendNextInSet_(setId, replyToken, prefixMessages) {
       var ok = replyRaw_(replyToken, messages);
       updateRow(SHEETS.TASK, t._row, {
         '送信本文': JSON.stringify(messages),
+        // 返信に失敗した分は「失敗」にしておくと flushQueue がpushで送り直す
         '送信状態': ok ? SEND_STATUS.SENT : SEND_STATUS.FAILED,
-        '送信日時': ok ? nowStr_() : ''
+        '送信日時': ok ? nowStr_() : '',
+        '作成日時': t['作成日時'] || nowStr_()
       });
       if (ok) updateRow(SHEETS.GAP, gap._row, { '状態': GAP_STATUS.ASKING });
-      return ok;
+      return ok ? SEND_RESULT.SENT : SEND_RESULT.FAILED;
     }
 
     var res = sendToStaff(t['送信先staff_id'], messages, { taskRowNumber: t._row, label: proc });
     if (res.ok && !res.queued) updateRow(SHEETS.GAP, gap._row, { '状態': GAP_STATUS.ASKING });
-    return res.ok;
+    return res.ok ? SEND_RESULT.SENT : SEND_RESULT.FAILED;
   }
 
   // 残りが無い場合は何も送らない（呼び出し側が完了メッセージを返す）
-  return false;
+  return SEND_RESULT.NONE;
 }
 
 /**
@@ -130,17 +139,20 @@ function fillPlaceholders_(template, gap) {
  * @return {string} 表示名
  */
 function displayName_(code) {
-  if (!displayName_._map) {
+  var staffTable = safely_('displayName_', function () { return readTable(SHEETS.STAFF); }, { rows: [] });
+  if (displayName_._src !== staffTable || displayName_._len !== staffTable.rows.length) {
     var m = {};
+    staffTable.rows.forEach(function (r) {
+      if (r['氏名']) m[String(r['staff_id'])] = String(r['氏名']);
+    });
     safely_('displayName_', function () {
-      findRows(SHEETS.STAFF).forEach(function (r) {
-        if (r['氏名']) m[String(r['staff_id'])] = String(r['氏名']);
-      });
       findRows(SHEETS.NAME_MAP).forEach(function (r) {
         if (r['氏名']) m[String(r['コード'])] = String(r['氏名']);
       });
     });
     displayName_._map = m;
+    displayName_._src = staffTable;
+    displayName_._len = staffTable.rows.length;
   }
   return displayName_._map[String(code)] || String(code);
 }
@@ -164,6 +176,12 @@ function handleAnswer_(staff, taskId, answer, replyToken) {
     replyRaw_(replyToken, [msgText_('この項目はすでに回答済みです。ありがとうございます。')]);
     return;
   }
+  // 自分あての確認かどうかを必ず確認する（他人あてのタスクには回答させない）
+  if (String(task['送信先staff_id']) !== String(staff['staff_id'])) {
+    logWarn(proc, '回答権限のない操作: ' + staff['staff_id'] + ' → ' + taskId);
+    replyRaw_(replyToken, [msgText_('この確認にはお答えいただけません。')]);
+    return;
+  }
 
   var gap = findRow(SHEETS.GAP, { 'gap_id': task['gap_id'] });
   var check = gap ? checkById_(gap['check_id']) : null;
@@ -176,7 +194,9 @@ function handleAnswer_(staff, taskId, answer, replyToken) {
       '回答方法': 'ボタン'
     });
     var done = msgText_('この項目は他の方が回答済みでした。ありがとうございます。');
-    if (!sendNextInSet_(task['セットid'], replyToken, [done])) replyRaw_(replyToken, [done]);
+    if (sendNextInSet_(task['セットid'], replyToken, [done]) === SEND_RESULT.NONE) {
+      replyRaw_(replyToken, [done]);
+    }
     logInfo(proc, taskId + ' は他の人が回答済みのため二重記録しない');
     return;
   }
@@ -216,10 +236,23 @@ function handleAnswer_(staff, taskId, answer, replyToken) {
     return;
   }
 
+  finishTurn_(task, replyToken);
+}
+
+/**
+ * 回答受付後の締めくくり。次の質問があれば送り、無ければ完了メッセージを返す。
+ * 送信に失敗した場合は同じreplyTokenを二度使わない（1回限りのため）。失敗分はflushQueueがpushで送る。
+ * @param {Object} task S6の行
+ * @param {string} replyToken 返信トークン
+ * @return {void}
+ */
+function finishTurn_(task, replyToken) {
   var thanks = msgText_('ありがとうございます。記録に反映しました。');
-  var sent = sendNextInSet_(task['セットid'], replyToken, [thanks]);
-  if (!sent) {
+  var result = sendNextInSet_(task['セットid'], replyToken, [thanks]);
+  if (result === SEND_RESULT.NONE) {
     replyRaw_(replyToken, [msgText_('ありがとうございます。記録に反映しました。\nこれで全部完了です。おつかれさまでした。')]);
+  } else if (result === SEND_RESULT.FAILED) {
+    logWarn('finishTurn_', '返信に失敗したため、次の質問はpush送信に切り替えます（' + task['セットid'] + '）');
   }
 }
 
@@ -257,9 +290,7 @@ function handleNote_(staff, text, replyToken) {
     cancelSiblingTasks_(gap['gap_id'], task['task_id']);
   }
 
-  var thanks = msgText_('ありがとうございます。記録に反映しました。');
-  var sent = sendNextInSet_(task['セットid'], replyToken, [thanks]);
-  if (!sent) replyRaw_(replyToken, [msgText_('ありがとうございます。記録に反映しました。\nこれで全部完了です。おつかれさまでした。')]);
+  finishTurn_(task, replyToken);
   return true;
 }
 
@@ -275,6 +306,13 @@ function recordFill_(gap, check, value, staff) {
   var itemName = check ? String(check['項目名']) : String(gap['check_id']);
   var kind = check ? String(check['対象種別']) : 'support';
   var date = toDateStr_(gap['対象日']);
+  var gapId = String(gap['gap_id']);
+
+  // 同じ不足に対する記録が既にあれば書かない（二重記録の防止）
+  if (findRow(SHEETS.FILL, { 'gap_id': gapId })) {
+    logWarn('recordFill_', '既に記録済みのためスキップ: ' + gapId);
+    return;
+  }
 
   // シフト希望は対象月（YYYY-MM）を値に含める。R01がこの値を見て「回答済み」と判定するため。
   if (kind === 'shift') value = date.substring(0, 7) + ' ' + value;
@@ -287,7 +325,8 @@ function recordFill_(gap, check, value, staff) {
     '値': value,
     '記入者staff_id': String(staff['staff_id']),
     '取込済フラグ': false,
-    '作成日時': nowStr_()
+    '作成日時': nowStr_(),
+    'gap_id': gapId
   });
 
   appendRow(SHEETS.LOG_IMPORT, {

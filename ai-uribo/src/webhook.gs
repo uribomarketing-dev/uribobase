@@ -10,11 +10,14 @@
  * 【検証方式についての注意（重要）】
  * Google Apps Script のウェブアプリは HTTP リクエストヘッダーを取得できないため、
  * X-Line-Signature ヘッダーによる署名検証を GAS 単体で行うことは技術的にできない。
- * そのため本実装では次の二段構えで正当性を担保する：
- *   (1) Webhook URL に秘密のクエリキーを付与し（?k=＜WEBHOOK_SECRET＞）、一致しないリクエストは破棄する
+ * そのため本実装では次の三段構えで正当性を担保する：
+ *   (1) Webhook URL に秘密のクエリキーを付与し（?k=＜WEBHOOK_SECRET＞）、一致しないリクエストは破棄する。
+ *       WEBHOOK_SECRET が未設定のときは「全部拒否」する（設定漏れが認証無効化にならないようにするため）
  *   (2) 署名検証関数 validateSignature_() は実装済みで、署名を渡せる経路（将来リバースプロキシを
  *       挟む場合など）ではそのまま利用できる。クエリ sig で署名が渡された場合は検証する
- * さらに、送信元ユーザーIDがS1スタッフマスタに無いイベントは操作を受け付けない。
+ *   (3) スタッフの紐付けは「管理者が個別に伝えた登録コード」を送ってもらう方式。
+ *       友だち追加しただけの第三者が、名前を選ぶだけでスタッフになりすますことはできない
+ * さらに、S1で有効=TRUEかつ紐付け済みのユーザー以外は操作を受け付けない。
  * この制約と対策は docs/デプロイ手順.md にも記載してある。
  */
 
@@ -59,11 +62,13 @@ function verifyRequest_(e) {
   if (!e || !e.postData || !e.postData.contents) return false;
   var props = PropertiesService.getScriptProperties();
   var key = props.getProperty(PROP.WEBHOOK_KEY);
-  if (key) {
-    if (!e.parameter || String(e.parameter.k) !== String(key)) return false;
-  } else {
-    logWarn('verifyRequest_', 'WEBHOOK_SECRET が未設定です。設定するまでURLを知る全員が送信できます');
+  // 未設定なら受け付けない（設定漏れがそのまま認証無効化にならないようにする）
+  if (!key) {
+    logError('verifyRequest_', 'WEBHOOK_SECRET が未設定のためリクエストを拒否しました。'
+      + 'スクリプトプロパティに設定してください');
+    return false;
   }
+  if (!e.parameter || String(e.parameter.k) !== String(key)) return false;
   // 署名が渡せる経路の場合は署名も検証する
   if (e.parameter && e.parameter.sig) {
     if (!validateSignature_(e.postData.contents, e.parameter.sig)) return false;
@@ -95,35 +100,37 @@ function validateSignature_(bodyText, signature) {
  * @return {void}
  */
 function handleEvent_(ev) {
-  if (isDuplicateEvent_(ev)) return;
-  var userId = (ev.source && ev.source.userId) ? ev.source.userId : '';
-  switch (ev.type) {
-    case 'follow': onFollow_(userId, ev.replyToken); break;
-    case 'unfollow': logInfo('unfollow', userId); break;
-    case 'postback': onPostback_(userId, ev.postback.data, ev.replyToken); break;
-    case 'message':
-      if (ev.message && ev.message.type === 'text') onText_(userId, String(ev.message.text).trim(), ev.replyToken);
-      else if (ev.replyToken) replyRaw_(ev.replyToken, [msgText_('ボタンでお答えください。困ったら「ヘルプ」と送ってください。')]);
-      break;
-    default: logInfo('handleEvent_', '未対応イベント: ' + ev.type);
-  }
-}
-
-/**
- * 同じWebhookイベントの二重処理を防ぐ（LINEは再送することがある）。
- * @param {Object} ev LINEイベント
- * @return {boolean} 処理済みならtrue
- */
-function isDuplicateEvent_(ev) {
-  var id = ev.webhookEventId;
-  if (!id) return false;
   var cache = CacheService.getScriptCache();
-  if (cache.get('ev_' + id)) {
-    logInfo('isDuplicateEvent_', '重複イベントを無視: ' + id);
-    return true;
+  var key = ev.webhookEventId ? ('ev_' + ev.webhookEventId) : '';
+
+  // 処理済み・処理中のイベントは無視する（LINEは同じイベントを再送することがある）
+  if (key) {
+    var state = cache.get(key);
+    if (state) {
+      logInfo('handleEvent_', '重複イベントを無視（' + state + '）: ' + ev.webhookEventId);
+      return;
+    }
+    cache.put(key, 'processing', 21600); // 6時間
   }
-  cache.put('ev_' + id, '1', 21600); // 6時間
-  return false;
+
+  var userId = (ev.source && ev.source.userId) ? ev.source.userId : '';
+  try {
+    switch (ev.type) {
+      case 'follow': onFollow_(userId, ev.replyToken); break;
+      case 'unfollow': logInfo('unfollow', userId); break;
+      case 'postback': onPostback_(userId, ev.postback.data, ev.replyToken); break;
+      case 'message':
+        if (ev.message && ev.message.type === 'text') onText_(userId, String(ev.message.text).trim(), ev.replyToken);
+        else if (ev.replyToken) replyRaw_(ev.replyToken, [msgText_('ボタンでお答えください。困ったら「ヘルプ」と送ってください。')]);
+        break;
+      default: logInfo('handleEvent_', '未対応イベント: ' + ev.type);
+    }
+    if (key) cache.put(key, 'done', 21600);
+  } catch (err) {
+    // 途中で落ちた場合は印を消し、LINEの再送で処理し直せるようにする（回答の取りこぼし防止）
+    if (key) cache.remove(key);
+    throw err;
+  }
 }
 
 /**
@@ -136,23 +143,77 @@ function onFollow_(userId, replyToken) {
   var proc = 'onFollow_';
   var known = staffByLineId_(userId);
   if (known) {
-    replyRaw_(replyToken, [msgText_(known['氏名'] + 'さん、おかえりなさい。AI Uriboです。\n困ったら「ヘルプ」と送ってください。')]);
+    var msg = isTrue_(known['有効'])
+      ? known['氏名'] + 'さん、おかえりなさい。AI Uriboです。\n困ったら「ヘルプ」と送ってください。'
+      : 'AI Uriboです。現在このアカウントは利用停止中です。管理者にご連絡ください。';
+    replyRaw_(replyToken, [msgText_(msg)]);
     return;
   }
-  var candidates = findRows(SHEETS.STAFF, function (r) {
-    return isTrue_(r['有効']) && !String(r['line_user_id'] || '').trim();
-  });
-  if (!candidates.length) {
-    replyRaw_(replyToken, [msgText_('AI Uriboです。恐れ入りますが、管理者の登録をお待ちください。')]);
-    logWarn(proc, '未登録ユーザーが友だち追加しました: ' + userId);
-    return;
+  // スタッフ名の一覧は出さない（第三者が名前を選ぶだけで登録できてしまうため）。
+  // 管理者が本人にだけ伝えた登録コードを送ってもらう方式にする。
+  replyRaw_(replyToken, [msgText_(
+    'AI Uriboです。Uriboの記録の抜けを見つけて、皆さんに確認する係です。\n\n'
+    + 'ご利用には登録が必要です。管理者からお伝えした「登録コード」（英数字8文字）をそのまま送ってください。\n'
+    + 'お持ちでない場合は管理者にご連絡ください。')]);
+  logInfo(proc, '未登録ユーザーが友だち追加: ' + userId);
+}
+
+/**
+ * 登録コードによるスタッフ紐付けを試みる。
+ * @param {string} userId LINEユーザーID
+ * @param {string} text 受信テキスト（登録コードの候補）
+ * @param {string} replyToken 返信トークン
+ * @return {boolean} 登録処理として扱ったらtrue
+ */
+function tryRegisterByCode_(userId, text, replyToken) {
+  var proc = 'tryRegisterByCode_';
+  var code = String(text).trim().toUpperCase().replace(/[\s-]/g, '');
+  if (!new RegExp('^[' + REGISTRATION_CODE_CHARS + ']{' + REGISTRATION_CODE_LENGTH + '}$').test(code)) {
+    return false;   // 登録コードの形をしていないので、通常のメッセージとして扱う
   }
-  var items = candidates.map(function (s) {
-    return { label: String(s['氏名']), data: 'iam|' + s['staff_id'] };
+
+  // 総当たりを防ぐため、1時間あたりの試行回数を制限する
+  var cache = CacheService.getScriptCache();
+  var attemptKey = 'reg_' + userId;
+  var attempts = Number(cache.get(attemptKey) || 0) + 1;
+  cache.put(attemptKey, String(attempts), 3600);
+  if (attempts > getSettingNum('register_attempt_limit', 10)) {
+    logWarn(proc, '登録コードの試行回数超過: ' + userId);
+    replyRaw_(replyToken, [msgText_('登録の試行回数が上限に達しました。しばらく待ってから、管理者にご連絡ください。')]);
+    return true;
+  }
+
+  return withLock_(proc, 20000, function () {
+    var staff = findRow(SHEETS.STAFF, function (r) {
+      return String(r['登録コード'] || '').trim().toUpperCase() === code;
+    });
+    if (!staff) {
+      logWarn(proc, '登録コード不一致: ' + userId);
+      replyRaw_(replyToken, [msgText_('登録コードが確認できませんでした。管理者にご確認ください。')]);
+      return true;
+    }
+    if (!isTrue_(staff['有効'])) {
+      logWarn(proc, '無効なスタッフの登録コードが使われました: ' + staff['staff_id']);
+      replyRaw_(replyToken, [msgText_('このコードは現在ご利用いただけません。管理者にご連絡ください。')]);
+      return true;
+    }
+    if (String(staff['line_user_id'] || '').trim()) {
+      // 既存の紐付けは絶対に自動で上書きしない（乗っ取り防止）
+      logWarn(proc, staff['staff_id'] + ' は既に別のLINEと紐付いています');
+      replyRaw_(replyToken, [msgText_('このスタッフ情報は登録済みです。付け替えが必要な場合は管理者にご連絡ください。')]);
+      return true;
+    }
+
+    // 紐付けたらコードは使い捨てにする（同じコードで2人目が登録できないように）
+    updateRow(SHEETS.STAFF, staff._row, { 'line_user_id': userId, '登録コード': '' });
+    replyRaw_(replyToken, [msgText_(staff['氏名'] + 'さんですね。登録しました。\n'
+      + 'これから記録の確認をお送りします。困ったら「ヘルプ」と送ってください。')]);
+    logInfo(proc, staff['氏名'] + ' を登録しました');
+    return true;
+  }, function () {
+    replyRaw_(replyToken, [msgText_('ただいま混み合っています。少し待ってからもう一度お送りください。')]);
+    return true;
   });
-  replyRaw_(replyToken, [msgQuickReply_(
-    'AI Uriboです。Uriboの記録の抜けを見つけて、皆さんに確認する係です。\nお名前を教えてください。', items)]);
-  logInfo(proc, '友だち追加: ' + userId);
 }
 
 /**
@@ -165,51 +226,45 @@ function onFollow_(userId, replyToken) {
 function onPostback_(userId, data, replyToken) {
   var proc = 'onPostback_';
   var parts = String(data).split('|');
-  var lock = LockService.getScriptLock();
-  lock.tryLock(20000);
-  try {
-    if (parts[0] === 'iam') {
-      bindStaff_(userId, parts[1], replyToken);
-      return;
+  withLock_(proc, 20000, function () {
+    try {
+      var staff = activeStaffByLineId_(userId, replyToken);
+      if (!staff) return;
+      if (parts[0] === 'ans') {
+        handleAnswer_(staff, parts[1], parts.slice(2).join('|'), replyToken);
+        return;
+      }
+      logWarn(proc, '未対応のpostback: ' + data);
+      replyRaw_(replyToken, [msgText_('うまく受け取れませんでした。もう一度ボタンを押してみてください。')]);
+    } catch (e) {
+      logError(proc, e, data);
+      replyRaw_(replyToken, [msgText_('申し訳ありません、処理中に問題が起きました。担当者に記録しました。')]);
     }
-    var staff = staffByLineId_(userId);
-    if (!staff) {
-      replyRaw_(replyToken, [msgText_('恐れ入りますが、管理者の登録をお待ちください。')]);
-      return;
-    }
-    if (parts[0] === 'ans') {
-      handleAnswer_(staff, parts[1], parts.slice(2).join('|'), replyToken);
-      return;
-    }
-    logWarn(proc, '未対応のpostback: ' + data);
-    replyRaw_(replyToken, [msgText_('うまく受け取れませんでした。もう一度ボタンを押してみてください。')]);
-  } catch (e) {
-    logError(proc, e, data);
-    replyRaw_(replyToken, [msgText_('申し訳ありません、処理中に問題が起きました。担当者に記録しました。')]);
-  } finally {
-    lock.releaseLock();
-  }
+  }, function () {
+    // ロックを取れないまま処理を続けると二重記録の原因になるため、必ず中断して案内する
+    replyRaw_(replyToken, [msgText_('ただいま処理が混み合っています。少し待ってからもう一度お試しください。')]);
+  });
 }
 
 /**
- * スタッフとLINEユーザーIDを紐付ける。
+ * 紐付け済みかつ有効なスタッフを取得する。該当しない場合は案内を返してnullを返す。
  * @param {string} userId LINEユーザーID
- * @param {string} staffId staff_id
  * @param {string} replyToken 返信トークン
- * @return {void}
+ * @return {Object|null} S1の行オブジェクト
  */
-function bindStaff_(userId, staffId, replyToken) {
-  var staff = staffById_(staffId);
+function activeStaffByLineId_(userId, replyToken) {
+  var staff = staffByLineId_(userId);
   if (!staff) {
-    replyRaw_(replyToken, [msgText_('登録情報が見つかりませんでした。管理者にご連絡ください。')]);
-    return;
+    replyRaw_(replyToken, [msgText_('恐れ入りますが、登録がお済みでないようです。'
+      + '管理者からお伝えした登録コードを送ってください。')]);
+    return null;
   }
-  if (String(staff['line_user_id'] || '').trim() && String(staff['line_user_id']) !== userId) {
-    logWarn('bindStaff_', staff['氏名'] + ' は既に別のLINEアカウントに紐付いています');
+  if (!isTrue_(staff['有効'])) {
+    logWarn('activeStaffByLineId_', '無効なスタッフからの操作: ' + staff['staff_id']);
+    replyRaw_(replyToken, [msgText_('現在このアカウントは利用停止中です。管理者にご連絡ください。')]);
+    return null;
   }
-  updateRow(SHEETS.STAFF, staff._row, { 'line_user_id': userId });
-  replyRaw_(replyToken, [msgText_(staff['氏名'] + 'さんですね。登録しました。\nこれから記録の確認をお送りします。困ったら「ヘルプ」と送ってください。')]);
-  logInfo('bindStaff_', staff['氏名'] + ' を ' + userId + ' に紐付け');
+  return staff;
 }
 
 /**
@@ -221,13 +276,34 @@ function bindStaff_(userId, staffId, replyToken) {
  */
 function onText_(userId, text, replyToken) {
   var proc = 'onText_';
-  var staff = staffByLineId_(userId);
-  if (!staff) {
-    replyRaw_(replyToken, [msgText_('AI Uriboです。恐れ入りますが、管理者の登録をお待ちください。')]);
+
+  // 未登録ユーザーからのメッセージは、登録コードとしてのみ受け付ける
+  if (!staffByLineId_(userId)) {
+    if (tryRegisterByCode_(userId, text, replyToken)) return;
+    replyRaw_(replyToken, [msgText_('AI Uriboです。ご利用には登録が必要です。'
+      + '管理者からお伝えした登録コード（英数字8文字）を送ってください。')]);
     return;
   }
-  var lock = LockService.getScriptLock();
-  lock.tryLock(20000);
+
+  withLock_(proc, 20000, function () {
+    var staff = activeStaffByLineId_(userId, replyToken);
+    if (!staff) return;
+    onTextBody_(staff, userId, text, replyToken, proc);
+  }, function () {
+    replyRaw_(replyToken, [msgText_('ただいま処理が混み合っています。少し待ってからもう一度お試しください。')]);
+  });
+}
+
+/**
+ * テキストメッセージ本体の処理（ロック取得済みの状態で呼ばれる）。
+ * @param {Object} staff スタッフのS1行
+ * @param {string} userId LINEユーザーID
+ * @param {string} text 本文
+ * @param {string} replyToken 返信トークン
+ * @param {string} proc ログ用の処理名
+ * @return {void}
+ */
+function onTextBody_(staff, userId, text, replyToken, proc) {
   try {
     // 「報告」コマンドの本文待ち
     var cache = CacheService.getScriptCache();
@@ -240,7 +316,7 @@ function onText_(userId, text, replyToken) {
     if (handleNote_(staff, text, replyToken)) return;
 
     switch (text) {
-      case '状況': replyRaw_(replyToken, [msgText_(buildStatusText_())]); return;
+      case '状況': replyRaw_(replyToken, [msgText_(buildStatusText_(staff))]); return;
       case 'ヘルプ': replyRaw_(replyToken, [msgText_(HELP_TEXT_)]); return;
       case '報告':
         cache.put('report_' + userId, '1', 600);
@@ -262,8 +338,6 @@ function onText_(userId, text, replyToken) {
   } catch (e) {
     logError(proc, e, text);
     replyRaw_(replyToken, [msgText_('申し訳ありません、処理中に問題が起きました。担当者に記録しました。')]);
-  } finally {
-    lock.releaseLock();
   }
 }
 
@@ -278,12 +352,24 @@ var HELP_TEXT_ = 'AI Uriboの使い方\n'
 
 /**
  * 「状況」コマンドの本文を作る。
+ * 社員・管理者は全体を、それ以外の役割は自分に割り当てられた分だけを見られる。
+ * @param {Object} staff 問い合わせたスタッフのS1行
  * @return {string} 本文
  */
-function buildStatusText_() {
+function buildStatusText_(staff) {
+  var role = String(staff['役割']);
+  var seesAll = (role === '社員' || role === '管理者');
   var pending = pendingGaps_();
+  if (!seesAll) {
+    var myId = String(staff['staff_id']);
+    pending = pending.filter(function (g) {
+      return String(g['一次確認先staff_id'] || '').split(',').some(function (id) {
+        return id.trim() === myId;
+      });
+    });
+  }
   var lines = ['【現在の状況】' + nowStr_()];
-  lines.push('未完了：' + pending.length + '件');
+  lines.push((seesAll ? '未完了：' : 'あなたの未完了：') + pending.length + '件');
   pending.slice(0, 10).forEach(function (g) {
     var c = checkById_(g['check_id']);
     lines.push('・' + toDateStr_(g['対象日']) + ' ' + displayName_(String(g['対象']))

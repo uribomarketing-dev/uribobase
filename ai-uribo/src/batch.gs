@@ -7,7 +7,13 @@
  *   flushQueue()    毎朝7:00   深夜帯に保留した送信を流す（notify.gsに実装）
  *
  * ※17:00エスカレーションは【08】で廃止。R03の滞留判定は週次ダイジェストで使う。
+ *
+ * 全てのバッチは withLock_ で直列化する。日曜10:00は朝バッチと週次ダイジェストが重なるため、
+ * 待ち時間を長め（既定5分）にとって、片方が終わるのを待ってから動くようにしている。
  */
+
+/** バッチがロックを待つ時間（ミリ秒） @type {number} */
+var BATCH_LOCK_WAIT_MS = 300000;
 
 /**
  * 朝バッチ。前日分を自動充足したうえで不足を検出し、確認LINEを送る。
@@ -15,37 +21,32 @@
  */
 function morningBatch() {
   var proc = 'morningBatch';
-  var lock = LockService.getScriptLock();
-  if (!lock.tryLock(30000)) {
-    logWarn(proc, '他の処理が実行中のため中止');
-    return '実行中のためスキップ';
-  }
-  try {
-    logStart(proc);
-    var targetDate = addDays_(todayStr_(), -1);
+  return withLock_(proc, BATCH_LOCK_WAIT_MS, function () {
+    try {
+      logStart(proc);
+      var targetDate = addDays_(todayStr_(), -1);
 
-    safely_(proc, function () { flushQueue(); });
-    var auto = safely_(proc, function () { return runAutoFill(targetDate); }, { filled: 0 });
-    var gaps = safely_(proc, function () { return detectGaps(targetDate, ['R01', 'R02']); }, []);
-    safely_(proc, function () { registerGaps(gaps); });
+      safely_(proc, function () { flushQueue(); });
+      var auto = safely_(proc, function () { return runAutoFill(targetDate); }, { filled: 0 });
+      var gaps = safely_(proc, function () { return detectGaps(targetDate, ['R01', 'R02']); }, []);
+      safely_(proc, function () { registerGaps(gaps); });
 
-    var md = formatMd_(targetDate);
-    var sentTotal = dispatchPendingGaps_(
-      // 予定（対象種別=plan）は夜の確認セットで扱うので朝は送らない
-      function (gap, check) { return !check || String(check['対象種別']) !== 'plan'; },
-      '【' + md + 'までの確認】',
-      proc
-    );
+      var md = formatMd_(targetDate);
+      var sentTotal = dispatchPendingGaps_(
+        // 予定（対象種別=plan）は夜の確認セットで扱うので朝は送らない
+        function (gap, check) { return !check || String(check['対象種別']) !== 'plan'; },
+        '【' + md + 'までの確認】',
+        proc
+      );
 
-    var summary = '自動充足' + auto.filled + '件 / 新規検出' + gaps.length + '件 / 送信' + sentTotal + '件';
-    logInfo(proc, summary);
-    return summary;
-  } catch (e) {
-    logError(proc, e);
-    return 'エラー: ' + e;
-  } finally {
-    lock.releaseLock();
-  }
+      var summary = '自動充足' + auto.filled + '件 / 新規検出' + gaps.length + '件 / 送信' + sentTotal + '件';
+      logInfo(proc, summary);
+      return summary;
+    } catch (e) {
+      logError(proc, e);
+      return 'エラー: ' + e;
+    }
+  }, function () { return '他の処理が実行中のためスキップ'; });
 }
 
 /**
@@ -55,12 +56,8 @@ function morningBatch() {
  */
 function nightBatch() {
   var proc = 'nightBatch';
-  var lock = LockService.getScriptLock();
-  if (!lock.tryLock(30000)) {
-    logWarn(proc, '他の処理が実行中のため中止');
-    return '実行中のためスキップ';
-  }
-  try {
+  return withLock_(proc, BATCH_LOCK_WAIT_MS, function () {
+   try {
     logStart(proc);
     var tomorrow = addDays_(todayStr_(), 1);
 
@@ -102,12 +99,11 @@ function nightBatch() {
     var summary = '予定検出' + planGaps.length + '件 / 確認' + pending.length + '件 / 送信' + sent + '件';
     logInfo(proc, summary);
     return summary;
-  } catch (e) {
+   } catch (e) {
     logError(proc, e);
     return 'エラー: ' + e;
-  } finally {
-    lock.releaseLock();
-  }
+   }
+  }, function () { return '他の処理が実行中のためスキップ'; });
 }
 
 /**
@@ -117,7 +113,8 @@ function nightBatch() {
  */
 function weeklyDigest() {
   var proc = 'weeklyDigest';
-  try {
+  return withLock_(proc, BATCH_LOCK_WAIT_MS, function () {
+   try {
     logStart(proc);
     var days = getSettingNum('digest_lookback_days', 7);
     var to = todayStr_();
@@ -186,10 +183,11 @@ function weeklyDigest() {
         わからない率: unknownRate, 自動充足: autoFilled, 自動充足率: autoRate }));
     logInfo(proc, '送信 ' + n + '名');
     return '未完了' + open.length + '件 / 送信' + n + '名';
-  } catch (e) {
+   } catch (e) {
     logError(proc, e);
     return 'エラー: ' + e;
-  }
+   }
+  }, function () { return '他の処理が実行中のためスキップ'; });
 }
 
 // ---------------------------------------------------------------------------

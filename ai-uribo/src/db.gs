@@ -31,12 +31,43 @@ function sheet_(sheetName) {
 }
 
 /**
- * シート全体を読み、ヘッダーと行オブジェクト配列を返す。
+ * 1回の実行中だけ有効なシート内容のキャッシュ。
+ * 同じシートを何度も読み直すとGASの6分制限に当たりやすいため、
+ * 読み込みは1実行につき1回にし、書き込み時にそのシートのキャッシュを捨てる。
+ * @type {Object.<string,Object>}
+ */
+var TABLE_CACHE_ = {};
+
+/**
+ * 指定シート（省略時は全シート）のキャッシュを破棄する。
+ * シートを直接 setValues などで書き換えたあとは必ず呼ぶこと。
+ * @param {string} [sheetName] シート名
+ * @return {void}
+ */
+function invalidateCache_(sheetName) {
+  if (sheetName) delete TABLE_CACHE_[sheetName];
+  else TABLE_CACHE_ = {};
+}
+
+/**
+ * シート全体を読み、ヘッダーと行オブジェクト配列を返す（1実行内はキャッシュを使う）。
  * 各行オブジェクトには実シート行番号 _row を持たせる。
  * @param {string} sheetName シート名
  * @return {{headers:Array.<string>, rows:Array.<Object>}} 読み取り結果
  */
 function readTable(sheetName) {
+  if (TABLE_CACHE_[sheetName]) return TABLE_CACHE_[sheetName];
+  var result = readTableFromSheet_(sheetName);
+  TABLE_CACHE_[sheetName] = result;
+  return result;
+}
+
+/**
+ * シートを実際に読み込む（キャッシュを介さない）。
+ * @param {string} sheetName シート名
+ * @return {{headers:Array.<string>, rows:Array.<Object>}} 読み取り結果
+ */
+function readTableFromSheet_(sheetName) {
   var sh = sheet_(sheetName);
   var lastRow = sh.getLastRow();
   var lastCol = sh.getLastColumn();
@@ -95,13 +126,21 @@ function findRow(sheetName, criteria) {
  */
 function appendRow(sheetName, obj) {
   var sh = sheet_(sheetName);
-  var headers = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0]
-    .map(function (h) { return String(h).trim(); });
+  var headers = readTable(sheetName).headers;
   var line = headers.map(function (h) {
     return (obj[h] === undefined || obj[h] === null) ? '' : obj[h];
   });
   sh.appendRow(line);
-  return sh.getLastRow();
+  var rowNumber = sh.getLastRow();
+
+  // キャッシュにも同じ行を足しておく（読み直しを避けるため）
+  var cached = TABLE_CACHE_[sheetName];
+  if (cached) {
+    var row = { _row: rowNumber };
+    headers.forEach(function (h, i) { if (h) row[h] = line[i]; });
+    cached.rows.push(row);
+  }
+  return rowNumber;
 }
 
 /**
@@ -113,15 +152,62 @@ function appendRow(sheetName, obj) {
  */
 function updateRow(sheetName, rowNumber, patch) {
   var sh = sheet_(sheetName);
-  var headers = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0]
-    .map(function (h) { return String(h).trim(); });
+  var headers = readTable(sheetName).headers;
+  var cached = TABLE_CACHE_[sheetName];
+  var cachedRow = cached ? cached.rows.filter(function (r) { return r._row === rowNumber; })[0] : null;
+
+  // 連続する列はまとめて1回で書く（セル単位の書き込みを減らす）
+  var indexes = [];
   for (var k in patch) {
     if (!patch.hasOwnProperty(k)) continue;
     var idx = headers.indexOf(k);
     if (idx < 0) continue;
-    sh.getRange(rowNumber, idx + 1).setValue(patch[k]);
+    indexes.push({ idx: idx, key: k });
+    if (cachedRow) cachedRow[k] = patch[k];
+  }
+  if (!indexes.length) return;
+  indexes.sort(function (a, b) { return a.idx - b.idx; });
+
+  var min = indexes[0].idx;
+  var max = indexes[indexes.length - 1].idx;
+  var current = sh.getRange(rowNumber, min + 1, 1, max - min + 1).getValues()[0];
+  indexes.forEach(function (e) { current[e.idx - min] = patch[e.key]; });
+  sh.getRange(rowNumber, min + 1, 1, current.length).setValues([current]);
+}
+
+/**
+ * ScriptLockを取って処理を実行する（再入可能）。
+ * すでに同じ実行の中でロックを持っている場合は取り直さず、内側で解放もしない。
+ * 全ての書き込み処理をこの関数で包むことで、「読んで無ければ追記」の競合を防ぐ。
+ * @param {string} proc 処理名（ログ用）
+ * @param {number} waitMs ロック取得を待つミリ秒
+ * @param {function():*} fn 実行する処理
+ * @param {function():*} [onBusy] ロックを取れなかったときの処理
+ * @return {*} fnの戻り値（取れなかった場合はonBusyの戻り値、無ければnull）
+ */
+function withLock_(proc, waitMs, fn, onBusy) {
+  if (withLock_._depth > 0) {
+    withLock_._depth++;
+    try { return fn(); } finally { withLock_._depth--; }
+  }
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(waitMs)) {
+    logWarn(proc, 'ロックを取得できませんでした（他の処理が実行中）');
+    return onBusy ? onBusy() : null;
+  }
+  withLock_._depth = 1;
+  // ロック待ちの間に他の実行が書き換えている可能性があるため、必ず読み直す
+  invalidateCache_();
+  checkById_._map = null;
+  clearSettingCache();
+  try {
+    return fn();
+  } finally {
+    withLock_._depth = 0;
+    lock.releaseLock();
   }
 }
+withLock_._depth = 0;
 
 /**
  * check_idからS3チェック項目を取得する（1実行内はキャッシュして読み込みを減らす）。
@@ -129,12 +215,14 @@ function updateRow(sheetName, rowNumber, patch) {
  * @return {Object|null} S3の行オブジェクト
  */
 function checkById_(checkId) {
-  if (!checkById_._map) {
+  var table = safely_('checkById_', function () { return readTable(SHEETS.CHECK); }, { rows: [] });
+  // キャッシュが作り直された場合・行が増えた場合は索引を作り直す
+  if (checkById_._src !== table || checkById_._len !== table.rows.length) {
     var m = {};
-    safely_('checkById_', function () {
-      findRows(SHEETS.CHECK).forEach(function (r) { m[String(r['check_id'])] = r; });
-    });
+    table.rows.forEach(function (r) { m[String(r['check_id'])] = r; });
     checkById_._map = m;
+    checkById_._src = table;
+    checkById_._len = table.rows.length;
   }
   return checkById_._map[String(checkId)] || null;
 }
@@ -274,5 +362,20 @@ function nextGapId_(targetDate) {
     var m = String(r['gap_id']).match(new RegExp('^' + key + '(\\d+)$'));
     if (m) max = Math.max(max, parseInt(m[1], 10));
   });
-  return key + ('00' + (max + 1)).slice(-3);
+  // 3桁でゼロ埋めするが、1000件を超えても桁を切らない（IDの重複を防ぐ）
+  var n = String(max + 1);
+  while (n.length < 3) n = '0' + n;
+  return key + n;
+}
+
+/**
+ * 登録コードを生成する（見間違えにくい文字だけを使う）。
+ * @return {string} 登録コード
+ */
+function makeRegistrationCode_() {
+  var s = '';
+  for (var i = 0; i < REGISTRATION_CODE_LENGTH; i++) {
+    s += REGISTRATION_CODE_CHARS.charAt(Math.floor(Math.random() * REGISTRATION_CODE_CHARS.length));
+  }
+  return s;
 }

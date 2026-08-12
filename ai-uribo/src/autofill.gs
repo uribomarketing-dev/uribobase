@@ -70,6 +70,18 @@ var AUTOFILL_SOURCES = [
  */
 function runAutoFill(targetDate) {
   var proc = 'runAutoFill';
+  // 「無ければ書く」の判定と追記の間に他の実行が割り込まないよう直列化する（再入可能）
+  return withLock_(proc, 120000, function () { return runAutoFillBody_(proc, targetDate); },
+    function () { return { filled: 0, bySource: {}, skipped: 0 }; });
+}
+
+/**
+ * 自動充足の本体（ロック取得済みの状態で呼ばれる）。
+ * @param {string} proc ログ用の処理名
+ * @param {string} targetDate 対象日 YYYY-MM-DD
+ * @return {{filled:number, bySource:Object.<string,number>, skipped:number}} 充足結果
+ */
+function runAutoFillBody_(proc, targetDate) {
   var date = toDateStr_(targetDate);
   logStart(proc, date);
 
