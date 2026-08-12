@@ -396,6 +396,35 @@ check('映像そのものは受け取らない（値は文字だけ）',
     || String(l.値).indexOf('http') === 0));
 run(`(function(){var c=checkById_('CHK105');updateRow(SHEETS.CHECK,c._row,{'有効':false});})()`);
 
+console.log('\n=== T7f AIまとめの貼り付け取り込みと注意語アラート ===');
+run(`(function(){
+  ['CHK104','CHK105'].forEach(function(id){var c=checkById_(id);updateRow(SHEETS.CHECK,c._row,{'有効':true});});
+})()`);
+pushes.length = 0; replies.length = 0;
+post([{ type: 'message', webhookEventId: 'e50', source: { userId: 'U_FUJI' }, message: { type: 'text', text: 'まとめ' }, replyToken: 'r50' }]);
+check('「まとめ」で貼り付けを促す', JSON.stringify(replies[0] || '').indexOf('AIまとめ') > 0, replies[0]);
+
+const summaryText = '2026/08/07 この時期、高齢の男性が床に座り込んだりうつ伏せになったりする様子が見られ、'
+  + '周囲には食器や物が置かれていました。台所では食事の準備や食器の洗い物をしている場面もありました。';
+replies.length = 0;
+post([{ type: 'message', webhookEventId: 'e51', source: { userId: 'U_FUJI' }, message: { type: 'text', text: summaryText }, replyToken: 'r51' }]);
+check('AIまとめがS4に残る',
+  rows('LOG_IMPORT').some(l => String(l.対象種別) === 'raw_summary' && String(l.発生日) === '2026-08-07'));
+check('先頭の日付を対象日として読む', JSON.stringify(replies[0] || '').indexOf('2026-08-07') > 0, replies[0]);
+check('文章から食事提供を推定で埋める',
+  rows('LOG_IMPORT').some(l => String(l.発生日) === '2026-08-07' && String(l.項目名) === '食事提供'
+    && String(l.値).indexOf('AIまとめより') > 0));
+check('文章から利用者の状況も拾う',
+  rows('LOG_IMPORT').some(l => String(l.発生日) === '2026-08-07' && String(l.項目名) === '利用者の状況'));
+check('注意語（うつ伏せ・座り込）を社員へ通知',
+  pushes.some(p => JSON.stringify(p).indexOf('気になる記述') > 0), pushes.map(p => p.to));
+check('全文ではなく該当箇所だけを記録に残す',
+  rows('LOG_IMPORT').filter(l => String(l.項目名) === '食事提供' && String(l.発生日) === '2026-08-07')
+    .every(l => String(l.値).length < summaryText.length));
+run(`(function(){
+  ['CHK104','CHK105'].forEach(function(id){var c=checkById_(id);updateRow(SHEETS.CHECK,c._row,{'有効':false});});
+})()`);
+
 console.log('\n=== T7c 深夜帯のキュー保存と朝の送信 ===');
 const setQuiet = (s, e) => run(`(function(){
   var a=findRow(SHEETS.SETTING,{'キー':'quiet_start_hour'});updateRow(SHEETS.SETTING,a._row,{'値':${s}});

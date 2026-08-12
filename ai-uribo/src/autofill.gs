@@ -108,6 +108,31 @@ var AUTOFILL_SOURCES = [
     }
   },
   {
+    id: 'summary_scan',
+    生ログ種別: 'raw_summary',
+    必要フラグ: '',
+    説明: 'AIまとめ等の文章をS3の検出キーワードで走査し、該当項目を推定で埋める',
+    map: function (raw) {
+      var text = String(raw['値'] || '');
+      if (!text) return [];
+      var out = [];
+      findRows(SHEETS.CHECK, function (c) { return String(c['検出キーワード'] || '').trim(); })
+        .forEach(function (c) {
+          var words = String(c['検出キーワード']).split(',').map(function (w) { return w.trim(); })
+            .filter(function (w) { return w; });
+          var hit = words.filter(function (w) { return text.indexOf(w) >= 0; });
+          if (!hit.length) return;
+          out.push({
+            項目名: String(c['項目名']),
+            値: excerptAround_(text, hit[0]) + '（AIまとめより／該当語：' + hit.join('・') + '）',
+            推定: true,
+            全利用者: String(raw['対象'] || 'ALL') === 'ALL'
+          });
+        });
+      return out;
+    }
+  },
+  {
     id: 'plan_carryover',
     生ログ種別: 'plan',           // 前夜に本人へ確認した「明日の予定」
     必要フラグ: '',
@@ -250,6 +275,64 @@ function writeAutoFill_(date, target, fill, sourceId) {
     '情報源': (fill.推定 ? '自動推定（' : '自動ログ（') + sourceId + '）',
     '要精査': fill.推定 ? true : false
   });
+}
+
+/**
+ * 文章から、該当語の周辺だけを切り出す（記録に残すのは要点だけにするため）。
+ * @param {string} text 全文
+ * @param {string} word 該当語
+ * @param {number} [span] 前後に取る文字数
+ * @return {string} 抜粋
+ */
+function excerptAround_(text, word, span) {
+  var n = span || 30;
+  var i = text.indexOf(word);
+  if (i < 0) return truncate_(text, n * 2);
+  var from = Math.max(0, i - n);
+  var to = Math.min(text.length, i + word.length + n);
+  return (from > 0 ? '…' : '') + text.substring(from, to) + (to < text.length ? '…' : '');
+}
+
+/**
+ * その日の文章ログ（AIまとめ等）に注意すべき語が無いか調べ、あれば社員へすぐ知らせる。
+ * 「転倒」「うつ伏せ」などは、記録として埋めるだけでなく人が気づく必要があるため。
+ * @param {string} targetDate 対象日 YYYY-MM-DD
+ * @return {number} 通知した件数
+ */
+function scanAlerts_(targetDate) {
+  var proc = 'scanAlerts_';
+  var words = String(getSetting('alert_keywords', '')).split(',')
+    .map(function (w) { return w.trim(); }).filter(function (w) { return w; });
+  if (!words.length) return 0;
+
+  var date = toDateStr_(targetDate);
+  var texts = findRows(SHEETS.LOG_IMPORT, function (r) {
+    return toDateStr_(r['発生日']) === date
+      && (String(r['対象種別']).indexOf('raw_summary') === 0 || String(r['対象種別']).indexOf('raw_openclaw') === 0);
+  });
+
+  var sent = 0;
+  texts.forEach(function (r) {
+    safely_(proc, function () {
+      var text = String(r['値'] || '');
+      var hit = words.filter(function (w) { return text.indexOf(w) >= 0; });
+      if (!hit.length) return;
+
+      // 同じ日・同じ語で二度知らせない
+      var cache = CacheService.getScriptCache();
+      var key = 'alert_' + date + '_' + hit.join('_') + '_' + String(r['対象']);
+      if (cache.get(key)) return;
+      cache.put(key, '1', 86400);
+
+      var msg = '【気になる記述】' + date + '　' + displayName_(String(r['対象'])) + '\n'
+        + '「' + hit.join('・') + '」という記述が見つかりました。\n\n'
+        + excerptAround_(text, hit[0], 60) + '\n\n'
+        + '※AIまとめの文章からの自動検出です。事実かどうかのご確認をお願いします。';
+      sent += sendToEscalationStaff([msgText_(msg)], proc);
+      logWarn(proc, date + ' に注意語を検出: ' + hit.join('・'));
+    });
+  });
+  return sent;
 }
 
 /**

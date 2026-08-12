@@ -368,12 +368,27 @@ function onTextBody_(staff, userId, text, replyToken, proc) {
       saveReport_(staff, text, replyToken);
       return;
     }
+    // 「まとめ」コマンドの本文待ち（SwitchBotのAIまとめを貼り付けてもらう）
+    if (cache.get('summary_' + userId)) {
+      cache.remove('summary_' + userId);
+      saveSummary_(staff, text, replyToken);
+      return;
+    }
     // 回答への一言追記
     if (handleNote_(staff, text, replyToken)) return;
 
     switch (text) {
       case '状況': replyRaw_(replyToken, [msgText_(buildStatusText_(staff))]); return;
       case 'ヘルプ': replyRaw_(replyToken, [msgText_(HELP_TEXT_)]); return;
+      case 'まとめ':
+        if (!isOfficeStaff_(staff)) {
+          replyRaw_(replyToken, [msgText_('このコマンドは社員のみ実行できます。')]);
+          return;
+        }
+        cache.put('summary_' + userId, '1', 900);
+        replyRaw_(replyToken, [msgText_('SwitchBotの「AIまとめ」の本文を、そのまま貼り付けて送ってください。\n'
+          + '先頭に日付（例：8/11）を書くとその日の記録になります。書かなければ昨日として扱います。')]);
+        return;
       case '精査':
         if (!isOfficeStaff_(staff)) {
           replyRaw_(replyToken, [msgText_('このコマンドは社員のみ実行できます。')]);
@@ -430,6 +445,7 @@ var HELP_TEXT_ = 'AI Uriboの使い方\n'
   + '・「ヘルプ」…このメッセージ\n'
   + '・「診断」…（社員のみ）不具合調査用の情報を返します\n'
   + '・「精査」…（社員のみ）データから推定して埋めた記録の一覧を返します\n'
+  + '・「まとめ」…（社員のみ）SwitchBotのAIまとめを貼り付けると記録に取り込みます\n'
   + '答えられないときは無理をせず「わからない」で大丈夫です。社員が引き取ります。';
 
 /**
@@ -460,6 +476,58 @@ function buildStatusText_(staff) {
   if (pending.length > 10) lines.push('…ほか' + (pending.length - 10) + '件');
   if (!pending.length) lines.push('すべて記録済みです。ありがとうございます。');
   return lines.join('\n');
+}
+
+/**
+ * 貼り付けられた「AIまとめ」を取り込み、その場で自動充足まで走らせる。
+ * 映像は受け取らず、文章だけをS4に残す。
+ * @param {Object} staff 貼り付けたスタッフのS1行
+ * @param {string} text 本文（先頭に日付があれば対象日として使う）
+ * @param {string} replyToken 返信トークン
+ * @return {void}
+ */
+function saveSummary_(staff, text, replyToken) {
+  var proc = 'saveSummary_';
+  var body = String(text).trim();
+  var date = addDays_(todayStr_(), -1);
+
+  // 先頭の日付（2026/08/11・2026-08-11・8/11 のいずれか）を対象日として読む
+  var m = body.match(/^\s*(20\d{2})[\/\-.](\d{1,2})[\/\-.](\d{1,2})/);
+  if (m) {
+    date = m[1] + '-' + ('0' + m[2]).slice(-2) + '-' + ('0' + m[3]).slice(-2);
+    body = body.substring(m[0].length).trim();
+  } else {
+    var m2 = body.match(/^\s*(\d{1,2})[\/\-.](\d{1,2})/);
+    if (m2) {
+      date = todayStr_().substring(0, 4) + '-' + ('0' + m2[1]).slice(-2) + '-' + ('0' + m2[2]).slice(-2);
+      body = body.substring(m2[0].length).trim();
+    }
+  }
+  if (!body) {
+    replyRaw_(replyToken, [msgText_('本文が読み取れませんでした。もう一度「まとめ」から始めてください。')]);
+    return;
+  }
+
+  appendRow(SHEETS.LOG_IMPORT, {
+    'log_id': nextSeqId_(SHEETS.LOG_IMPORT, 'log_id', 'LOG', 6),
+    '発生日': date,
+    '対象種別': 'raw_summary',
+    '対象': String(staff['拠点'] === '本部' ? 'ALL' : (staff['拠点'] || 'ALL')),
+    '項目名': 'AIまとめ',
+    '値': truncate_(body, 1000),
+    '取込元': 'switchbot-ai',
+    '取込日時': nowStr_()
+  });
+
+  var auto = safely_(proc, function () { return runAutoFill(date); }, { filled: 0, estimated: 0 });
+  var alerts = safely_(proc, function () { return scanAlerts_(date); }, 0);
+
+  var lines = ['取り込みました（' + date + '分）。'];
+  lines.push('この文章から ' + auto.filled + '件を記録に反映しました（うち推定 ' + auto.estimated + '件）。');
+  if (alerts) lines.push('※気になる記述があったため、社員に別途お知らせしました。');
+  lines.push('内容は「精査」と送ると確認できます。');
+  replyRaw_(replyToken, [msgText_(lines.join('\n'))]);
+  logInfo(proc, staff['氏名'] + ' がAIまとめを取り込み（' + date + '・' + auto.filled + '件反映）');
 }
 
 /**
