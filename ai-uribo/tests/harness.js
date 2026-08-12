@@ -167,7 +167,10 @@ const sandbox = {
       return { getResponseCode: () => 200, getContentText: () => '{}' };
     }
   },
-  ContentService: { createTextOutput: t => ({ text: t }) },
+  ContentService: {
+    createTextOutput: t => { const o = { text: t, setMimeType: () => o }; return o; },
+    MimeType: { JSON: 'application/json' }
+  },
   DriveApp: {
     getRootFolder: () => mockFolder('root'),
     getFileById: () => ({ makeCopy: () => ({}) })
@@ -192,7 +195,7 @@ function mockFolder(name) {
 function iter(arr) { let i = 0; return { hasNext: () => i < arr.length, next: () => arr[i++] }; }
 
 vm.createContext(sandbox);
-['config', 'db', 'log', 'notify', 'setup', 'learn', 'autofill', 'detect', 'ask', 'batch', 'webhook', 'backup', 'diagnose', 'switchbot', 'selfcheck', 'users', 'consistency'].forEach(f => {
+['config', 'db', 'log', 'notify', 'setup', 'learn', 'autofill', 'detect', 'ask', 'batch', 'webhook', 'backup', 'diagnose', 'switchbot', 'selfcheck', 'users', 'consistency', 'api'].forEach(f => {
   vm.runInContext(fs.readFileSync(path.join(SRC, f + '.gs'), 'utf8'), sandbox, { filename: f + '.gs' });
 });
 
@@ -800,6 +803,38 @@ check('診断に個人情報を含めない', diagText.indexOf('U_FUJI') < 0 && 
 replies.length = 0;
 post([{ type: 'message', webhookEventId: 'e35', source: { userId: 'U_NIGHT' }, message: { type: 'text', text: '診断' }, replyToken: 'r35' }]);
 check('夜勤は診断コマンドを使えない', JSON.stringify(replies[0] || '').indexOf('社員のみ') > 0, replies[0]);
+
+console.log('\n=== T14 既存アプリへの受け渡し口（API） ===');
+const apiGet = (params) => JSON.parse(run(`doGet(${JSON.stringify({ parameter: params })})`).text);
+check('秘密キーが違えば何も返さない',
+  apiGet({ k: 'wrong', mode: 'fills' }).ok === false, apiGet({ k: 'wrong', mode: 'fills' }));
+check('キー無しの素のアクセスは生存確認だけ返す',
+  String(run(`doGet(${JSON.stringify({ parameter: {} })})`).text).indexOf('AI Uribo is running') === 0);
+const apiFillsRes = apiGet({ k: 'k123', mode: 'fills' });
+check('未取込の補完台帳を渡せる', apiFillsRes.ok === true && apiFillsRes.count > 0, apiFillsRes.count);
+check('渡すのは記号だけで氏名は含めない',
+  JSON.stringify(apiFillsRes.items).indexOf('山田テスト') < 0 && apiFillsRes.items[0].対象 !== undefined);
+check('どこから来た記録かも一緒に渡す（情報源・要精査）',
+  apiFillsRes.items.every(i => i.情報源 !== undefined && i.要精査 !== undefined));
+const someIds = apiFillsRes.items.slice(0, 2).map(i => i.fill_id);
+const marked = JSON.parse(run(`doPost(${JSON.stringify({
+  parameter: { k: 'k123' },
+  postData: { contents: JSON.stringify({ action: 'markImported', fill_ids: someIds }) }
+})})`).text);
+check('取り込めたものに済みを付けられる', marked.marked === someIds.length, marked);
+check('済みを付けたものは次から渡されない',
+  apiGet({ k: 'k123', mode: 'fills' }).items.every(i => someIds.indexOf(i.fill_id) < 0));
+check('済みを付けそこねた分は次も渡される（取りこぼしが起きない）',
+  apiGet({ k: 'k123', mode: 'fills' }).count === apiFillsRes.count - someIds.length);
+const usersApi = apiGet({ k: 'k123', mode: 'users' });
+check('氏名の対応表は別の呼び出しでだけ渡す',
+  usersApi.ok === true && usersApi.items.some(u => u.氏名 === '山田テスト'), usersApi);
+const ping = apiGet({ k: 'k123', mode: 'ping' });
+check('生存確認で残件とテストモードが分かる',
+  ping.ok === true && ping['未取込の補完'] !== undefined && ping['テストモード'] !== undefined, ping);
+check('知らないmodeは何も返さない', apiGet({ k: 'k123', mode: 'nope' }).ok === false);
+check('日付で絞り込める',
+  apiGet({ k: 'k123', mode: 'fills', from: '2099-01-01' }).count === 0);
 
 console.log('\n=== T13 記録の食い違い ===');
 const conDate = run(`addDays_(todayStr_(),-7)`);

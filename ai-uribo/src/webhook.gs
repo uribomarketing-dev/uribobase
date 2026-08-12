@@ -41,6 +41,13 @@ function doPost(e) {
       return ContentService.createTextOutput('OK:' + m);
     }
 
+    // 既存アプリからの「取り込み済み」通知
+    if (!body.events && String(body.action || '') === 'markImported') {
+      var marked = safely_(proc, function () { return markImported_(body); }, 0);
+      return ContentService.createTextOutput(JSON.stringify({ ok: true, marked: marked }))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
+
     // LINE以外からの投入も同じ入口で受ける（送信元を本文の形で見分ける）
     if (!body.events && (body.observations || body.source)) {
       var n = ingestObservations_(body);
@@ -112,6 +119,8 @@ function ingestObservations_(body) {
  * @return {TextOutput} 応答
  */
 function doGet(e) {
+  // 既存アプリからの読み取り要求（?mode=... 付き）はAPIとして扱う
+  if (e && e.parameter && e.parameter.mode) return handleApiGet_(e);
   return ContentService.createTextOutput('AI Uribo is running. ' + nowStr_());
 }
 
