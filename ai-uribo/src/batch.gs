@@ -338,7 +338,8 @@ function formatMd_(dateStr) {
  */
 function installTriggers() {
   var proc = 'installTriggers';
-  var handlers = ['morningBatch', 'nightBatch', 'weeklyDigest', 'dailyBackup', 'flushQueue', 'switchbotPoll'];
+  var handlers = ['morningBatch', 'nightBatch', 'weeklyDigest', 'dailyBackup', 'flushQueue',
+                  'switchbotPoll', 'selfCheck'];
   ScriptApp.getProjectTriggers().forEach(function (t) {
     if (handlers.indexOf(t.getHandlerFunction()) >= 0) ScriptApp.deleteTrigger(t);
   });
@@ -353,6 +354,9 @@ function installTriggers() {
   ScriptApp.newTrigger('nightBatch').timeBased().atHour(night).everyDays(1).inTimezone(TZ).create();
   ScriptApp.newTrigger('dailyBackup').timeBased().atHour(backup).everyDays(1).inTimezone(TZ).create();
   ScriptApp.newTrigger('flushQueue').timeBased().atHour(quietEnd).everyDays(1).inTimezone(TZ).create();
+  // 自己点検は朝バッチより前。ここでトリガーの欠けや連携の停止に自分で気づく
+  ScriptApp.newTrigger('selfCheck').timeBased()
+    .atHour(getSettingNum('selfcheck_hour', 8)).everyDays(1).inTimezone(TZ).create();
   // SwitchBotの状態取得は朝バッチの前に走らせる（取得した値をその日の充足に使うため）
   if (PropertiesService.getScriptProperties().getProperty('SWITCHBOT_TOKEN')) {
     ScriptApp.newTrigger('switchbotPoll').timeBased()
@@ -362,7 +366,8 @@ function installTriggers() {
     .onWeekDay(dayOfWeek_(getSettingNum('weekly_digest_dow', 0)))
     .atHour(digestHour).inTimezone(TZ).create();
 
-  var summary = '朝' + morning + '時 / 夜' + night + '時 / 週次(日)' + digestHour + '時 / バックアップ' + backup + '時 / キュー送信' + quietEnd + '時';
+  var summary = '自己点検' + getSettingNum('selfcheck_hour', 8) + '時 / 朝' + morning + '時 / 夜' + night
+    + '時 / 週次(日)' + digestHour + '時 / バックアップ' + backup + '時 / キュー送信' + quietEnd + '時';
   logInfo(proc, summary);
   return summary;
 }

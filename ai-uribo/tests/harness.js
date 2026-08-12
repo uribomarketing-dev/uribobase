@@ -31,6 +31,7 @@ class MockSheet {
   }
   getMaxColumns() { return Math.max(this.getLastColumn(), 1); }
   deleteColumns() { }
+  insertColumnsAfter() { return this; }
   setFrozenRows() { return this; }
   appendRow(values) {
     const r = this.getLastRow() + 1;
@@ -64,6 +65,15 @@ class MockRange {
     return this;
   }
   setValue(v) { return this.setValues([[v]]); }
+  clearContent() {
+    for (let r = 0; r < this.numRows; r++) {
+      for (let c = 0; c < this.numCols; c++) {
+        const row = this.sheet.data[this.row - 1 + r];
+        if (row) row[this.col - 1 + c] = '';
+      }
+    }
+    return this;
+  }
   setNote() { return this; }
   setFontWeight() { return this; }
   setBackground() { return this; }
@@ -136,8 +146,11 @@ const sandbox = {
     })
   },
   ScriptApp: {
-    getProjectTriggers: () => [],
-    deleteTrigger: () => { },
+    getProjectTriggers: () => sandbox.__triggers.map(fn => ({ getHandlerFunction: () => fn })),
+    deleteTrigger: (t) => {
+      const i = sandbox.__triggers.indexOf(t.getHandlerFunction());
+      if (i >= 0) sandbox.__triggers.splice(i, 1);
+    },
     newTrigger: (fn) => {
       const b = {
         timeBased: () => b, atHour: () => b, everyDays: () => b, onWeekDay: () => b,
@@ -179,7 +192,7 @@ function mockFolder(name) {
 function iter(arr) { let i = 0; return { hasNext: () => i < arr.length, next: () => arr[i++] }; }
 
 vm.createContext(sandbox);
-['config', 'db', 'log', 'notify', 'setup', 'learn', 'autofill', 'detect', 'ask', 'batch', 'webhook', 'backup', 'diagnose', 'switchbot'].forEach(f => {
+['config', 'db', 'log', 'notify', 'setup', 'learn', 'autofill', 'detect', 'ask', 'batch', 'webhook', 'backup', 'diagnose', 'switchbot', 'selfcheck'].forEach(f => {
   vm.runInContext(fs.readFileSync(path.join(SRC, f + '.gs'), 'utf8'), sandbox, { filename: f + '.gs' });
 });
 
@@ -191,6 +204,7 @@ function check(label, cond, extra) {
   if (!cond) failures++;
 }
 const rows = sheet => run(`findRows(SHEETS.${sheet})`);
+const clearCache = () => Object.keys(cache).forEach(k => delete cache[k]);
 const isTrueLike = v => v === true || String(v).toLowerCase() === 'true';
 
 console.log('\n=== T1 台帳生成 ===');
@@ -479,7 +493,7 @@ run(`(function(){
 console.log('  poll → ' + run('switchbotPoll()'));
 check('温湿度がS4に入る',
   rows('LOG_IMPORT').some(l => String(l.対象種別) === 'raw_meter' && String(l.値).indexOf('室温28.4℃') >= 0),
-  rows('LOG_IMPORT').filter(l => String(l.取込元) === 'switchbot-poll').map(l => l.値));
+  rows('LOG_IMPORT').filter(l => String(l.取込元).indexOf('switchbot-poll') === 0).map(l => l.値));
 check('電池残量が少ない機器を警告する',
   rows('RUN_LOG').some(r => String(r.結果) === '警告' && String(r.詳細).indexOf('電池残量') > 0));
 
@@ -489,7 +503,10 @@ const sbHook = { eventType: 'changeReport', eventVersion: '1', context: {
 const hookRes = run(`doPost(${JSON.stringify({ parameter: { k: 'k123' }, postData: { contents: JSON.stringify(sbHook) } })})`);
 check('SwitchBotのWebhookを受け取る', String(hookRes.text) === 'OK:1', hookRes);
 check('機器マスタのMACで利用者に紐付く',
-  rows('LOG_IMPORT').some(l => String(l.取込元) === 'switchbot-webhook' && String(l.対象種別) === 'raw_switchbot'));
+  rows('LOG_IMPORT').some(l => String(l.取込元).indexOf('switchbot-webhook:') === 0 && String(l.対象種別) === 'raw_switchbot'));
+check('どの機器から届いたかが取込元に残る（機器ごとに追える）',
+  rows('LOG_IMPORT').some(l => String(l.取込元).indexOf('switchbot-poll:') === 0),
+  rows('LOG_IMPORT').filter(l => String(l.取込元).indexOf('switchbot') === 0).map(l => l.取込元));
 const unknownHook = { eventType: 'changeReport', context: { deviceMac: 'FFFFFFFFFFFF', openState: 'open' } };
 const unknownRes = run(`doPost(${JSON.stringify({ parameter: { k: 'k123' }, postData: { contents: JSON.stringify(unknownHook) } })})`);
 check('未登録の機器からの通知は記録しない', String(unknownRes.text) === 'OK:0', unknownRes);
@@ -745,9 +762,82 @@ replies.length = 0;
 post([{ type: 'message', webhookEventId: 'e35', source: { userId: 'U_NIGHT' }, message: { type: 'text', text: '診断' }, replyToken: 'r35' }]);
 check('夜勤は診断コマンドを使えない', JSON.stringify(replies[0] || '').indexOf('社員のみ') > 0, replies[0]);
 
+console.log('\n=== T12 自己点検と自動整理（手がかからない仕組み） ===');
+// 1. トリガーが消えていたら、自分で入れ直す
 run('installTriggers()');
-check('トリガーを登録（SwitchBot設定時は6本）',
-  sandbox.__triggers.length === 6 && sandbox.__triggers.indexOf('switchbotPoll') >= 0, sandbox.__triggers);
+sandbox.__triggers.length = 0;      // トリガーが消えた状態を作る
+pushes.length = 0;
+run('selfCheck()');
+check('消えたトリガーを自分で入れ直す',
+  sandbox.__triggers.indexOf('morningBatch') >= 0 && sandbox.__triggers.indexOf('selfCheck') >= 0,
+  sandbox.__triggers);
+check('自動で直したことは実行ログに残る',
+  rows('RUN_LOG').some(r => String(r.詳細).indexOf('トリガーの再設定') >= 0));
+
+// 2. 人の手が要ることだけを1通にまとめて知らせる
+const noticeText = JSON.stringify(pushes);
+check('要対応があれば社員に1通だけ届く',
+  pushes.length > 0 && noticeText.indexOf('自己点検') > 0, pushes.length);
+check('LINE未登録の方がいることを知らせる', noticeText.indexOf('登録が済んでいない') > 0);
+
+// 3. 同じ内容が続く日は送らない（毎日同じ知らせが届いて読まれなくなるのを防ぐ）
+pushes.length = 0;
+run('selfCheck()');
+check('前回と同じ内容なら送らない', pushes.length === 0, pushes.length);
+
+// 4. 問題が無ければ何も送らない
+clearCache();
+run(`(function(){
+  // 機器から今日ぶんの通知が届いている状態にする（届いていれば知らせない、を確かめる）
+  findRows(SHEETS.DEVICE,function(r){return isTrue_(r['有効']);}).forEach(function(d){
+    appendRow(SHEETS.LOG_IMPORT,{log_id:nextSeqId_(SHEETS.LOG_IMPORT,'log_id','LOG',6),
+      発生日:todayStr_(),対象種別:'raw_door',対象:'TEST01',項目名:'玄関',値:'開',
+      取込元:'switchbot-webhook:'+d['deviceId'],取込日時:nowStr_()});
+  });
+  findRows(SHEETS.STAFF,function(r){return isTrue_(r['有効'])&&!String(r['line_user_id']||'').trim();})
+    .forEach(function(r){updateRow(SHEETS.STAFF,r._row,{'line_user_id':'U_DUMMY_'+r['staff_id']});});
+  findRows(SHEETS.LEARN,function(r){return String(r['段階'])==='要見直し';})
+    .forEach(function(r){updateRow(SHEETS.LEARN,r._row,{'段階':'確認中'});});
+  findRows(SHEETS.TASK,function(r){return String(r['送信状態'])==='テスト';})
+    .forEach(function(r){updateRow(SHEETS.TASK,r._row,{'送信状態':'送信済'});});
+})()`);
+pushes.length = 0;
+const quietResult = run('selfCheck()');
+check('機器から届いていれば機器の警告は出さない、問題が無ければ何も送らない',
+  pushes.length === 0 && String(quietResult).indexOf('要対応0件') === 0,
+  quietResult + ' / ' + JSON.stringify(pushes).substring(0, 200));
+
+// 5. 動いていないバッチに気づく
+run(`appendRow(SHEETS.RUN_LOG,{日時:addDays_(todayStr_(),-5)+' 10:00',処理名:'morningBatch',結果:'完了',詳細:'テスト'})`);
+clearCache();
+pushes.length = 0;
+run('selfCheck()');
+check('何日も動いていないバッチに気づいて知らせる',
+  JSON.stringify(pushes).indexOf('日動いていません') > 0, JSON.stringify(pushes).substring(0, 200));
+
+// 6. 古い行は消さずに「_保管」シートへ移す
+run(`(function(){
+  var r=findRow(SHEETS.SETTING,{'キー':'archive_after_days'});updateRow(SHEETS.SETTING,r._row,{'値':'30'});
+  clearSettingCache();
+  appendRow(SHEETS.LOG_IMPORT,{log_id:'OLD1',発生日:addDays_(todayStr_(),-400),対象種別:'support',対象:'TEST01',
+    項目名:'在否確認',値:'在宅',取込元:'ai-uribo',取込日時:nowStr_(),確度:'確定',推定回答:''});
+})()`);
+const beforeArchive = rows('LOG_IMPORT').length;
+run('archiveOldRows()');
+const afterArchive = rows('LOG_IMPORT').length;
+check('古い行はS4から外れる', afterArchive < beforeArchive, beforeArchive + '→' + afterArchive);
+check('外した行は消さずに保管シートへ移る',
+  book.sheets.some(sh => sh.name === 'S4_実績ログ取込_保管')
+    && run(`findRows('S4_実績ログ取込_保管')`).some(r => r.log_id === 'OLD1'),
+  book.sheets.map(sh => sh.name).filter(n => n.indexOf('保管') > 0));
+check('新しい行は残る', rows('LOG_IMPORT').some(r => r.対象 === 'TEST03'));
+check('自動整理はバックアップの後に走る',
+  String(run('dailyBackup()')).indexOf('のバックアップ完了') > 0);
+
+run('installTriggers()');
+check('トリガーを登録（SwitchBot設定時は7本）',
+  sandbox.__triggers.length === 7 && sandbox.__triggers.indexOf('switchbotPoll') >= 0
+    && sandbox.__triggers.indexOf('selfCheck') >= 0, sandbox.__triggers);
 // 「WEBHOOK_SECRET未設定なので拒否した」は、fail-closeの検証で意図的に出したエラー
 const unexpectedErrors = rows('RUN_LOG').filter(r => r.結果 === 'エラー' &&
   String(r.詳細).indexOf('WEBHOOK_SECRET が未設定') < 0);

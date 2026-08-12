@@ -69,8 +69,11 @@ function dailyBackupBody_(proc) {
     // 4. 復旧手順書を同梱
     safely_(proc, function () { ensureRestoreGuide_(root); });
 
+    // 5. 古い行を保管シートへ移す（この日のCSVを取り終えた後にだけ行う）
+    var archived = safely_(proc, function () { return archiveOldRows(); }, '自動整理なし');
+
     var summary = today + ' のバックアップ完了：CSV ' + count + '件 / monthly移動 ' + rotated.moved
-      + '件 / 削除 ' + rotated.trashed + '件';
+      + '件 / 削除 ' + rotated.trashed + '件 / ' + archived;
     logInfo(proc, summary);
     return summary;
   } catch (e) {

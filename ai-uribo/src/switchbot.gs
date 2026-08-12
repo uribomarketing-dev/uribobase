@@ -180,7 +180,7 @@ function switchbotPoll() {
           '対象': String(d['対象user_code'] || d['拠点'] || 'ALL'),
           '項目名': role.項目名,
           '値': value,
-          '取込元': 'switchbot-poll',
+          '取込元': 'switchbot-poll:' + String(d['deviceId']),
           '取込日時': nowStr_()
         });
         written++;
@@ -312,7 +312,7 @@ function ingestSwitchbotWebhook_(body) {
       '対象': String(dev['対象user_code'] || dev['拠点'] || 'ALL'),
       '項目名': itemName,
       '値': describeWebhook_(ctx) + '（' + Utilities.formatDate(new Date(), TZ, 'HH:mm') + '）',
-      '取込元': 'switchbot-webhook',
+      '取込元': 'switchbot-webhook:' + String(dev['deviceId']),
       '取込日時': nowStr_()
     });
     logInfo(proc, String(dev['deviceName']) + ' の通知を記録');

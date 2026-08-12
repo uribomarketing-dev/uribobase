@@ -35,12 +35,12 @@ function exportDiagnostics(brief) {
     lines.push('シート: ' + (missing.length ? '不足あり → ' + missing.join(', ')
       : SHEET_DEFS.length + 'シートすべてあり'));
     var handlers = ScriptApp.getProjectTriggers().map(function (t) { return t.getHandlerFunction(); });
-    ['morningBatch', 'nightBatch', 'weeklyDigest', 'dailyBackup', 'flushQueue'].forEach(function (f) {
+    var required = ['morningBatch', 'nightBatch', 'weeklyDigest', 'dailyBackup', 'flushQueue', 'selfCheck'];
+    required.forEach(function (f) {
       if (handlers.indexOf(f) < 0) lines.push('トリガー未設定★: ' + f);
     });
-    if (['morningBatch', 'nightBatch', 'weeklyDigest', 'dailyBackup', 'flushQueue']
-        .every(function (f) { return handlers.indexOf(f) >= 0; })) {
-      lines.push('トリガー: 5本すべて設定済');
+    if (required.every(function (f) { return handlers.indexOf(f) >= 0; })) {
+      lines.push('トリガー: ' + required.length + '本すべて設定済');
     }
     lines.push('テストモード: ' + (isTrue_(getSetting('test_mode', 'FALSE'))
       ? 'ON（LINEに実際には送っていません）' : 'OFF（実際に送信します）'));
@@ -91,7 +91,7 @@ function exportDiagnostics(brief) {
     lines.push('');
     lines.push('【各バッチの最終実行】');
     var logs = findRows(SHEETS.RUN_LOG);
-    ['morningBatch', 'nightBatch', 'weeklyDigest', 'dailyBackup', 'flushQueue'].forEach(function (name) {
+    ['selfCheck', 'morningBatch', 'nightBatch', 'weeklyDigest', 'dailyBackup', 'flushQueue'].forEach(function (name) {
       var last = null;
       logs.forEach(function (r) { if (String(r['処理名']) === name && String(r['結果']) !== '開始') last = r; });
       lines.push(name + ': ' + (last ? toDateTimeStr_(last['日時']) + ' ' + last['結果'] + ' / '
