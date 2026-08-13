@@ -1331,34 +1331,47 @@ run(`(function(){
 console.log('\n=== T32 その材料が本当に効いているかを測る ===');
 // センサーやAIハブは月々の費用がかかる。続けるかどうかを「便利そう」で決めないために、
 // 材料を添えた質問と添えなかった質問で「わからない」率を比べる（現場の操作は増えない）
-const putTask = (withRef, unknown, i) => run(`(function(){
+// 材料あり／材料なし（「ありませんでした」と書いて送った日）／そもそも材料を添えない質問、の3種類
+const BODY = {
+  ref: '（参考）夜間の動き：共用部で動きあり 02:40\n巡回はいかがでしたか',
+  none: '（参考）2026-08-12 の「夜間の動き」の自動記録はありませんでした。\n巡回はいかがでしたか',
+  other: 'シフト希望をお聞かせください'
+};
+const putTask = (kind, unknown, i) => run(`(function(){
   appendRow(SHEETS.TASK, {task_id:'ZZE${i}', gap_id:'', 送信先staff_id:'STF001',
     送信日時: todayStr_() + ' 10:00',
     回答: ${JSON.stringify(unknown ? 'わからない' : '済')},
     回答日時: todayStr_() + ' 10:05', 回答方法:'ボタン',
-    送信本文: ${JSON.stringify(withRef ? '（参考）夜間の動き：共用部で動きあり 02:40\n巡回はいかがでしたか' : '巡回はいかがでしたか')},
+    送信本文: ${JSON.stringify(BODY[kind])},
     送信状態:'送信済', 再送回数:0, 追記待ち:false, セットid:'', 並び順:0, retry_key:'', 作成日時: nowStr_()});
 })()`);
 
 // まだ件数が少ないうちは「判断できません」と正直に言う
-putTask(true, false, 0); putTask(false, true, 1);
+putTask('ref', false, 0); putTask('none', true, 1);
 check('件数が少ないうちは判定しない（数字で誤解させない）',
   run('effectLines_()').join('\n').indexOf('まだ判断できません') > 0, run('effectLines_()'));
 
 // 材料あり20件（わからない1件）／材料なし20件（わからない8件）
-for (let i = 0; i < 20; i++) putTask(true, i < 1, 100 + i);
-for (let i = 0; i < 20; i++) putTask(false, i < 8, 200 + i);
+run(`deleteRowsWhere_(SHEETS.TASK, function(r){ return String(r['task_id']).indexOf('ZZE') === 0; })`);
+for (let i = 0; i < 20; i++) putTask('ref', i < 1, 100 + i);
+for (let i = 0; i < 20; i++) putTask('none', i < 8, 200 + i);
+// そもそも材料を添えない種類の質問（シフト希望など）を混ぜても、比較を汚さないこと
+for (let i = 0; i < 30; i++) putTask('other', i < 25, 500 + i);
 const eff = run('effectLines_()').join('\n');
-check('材料ありと材料なしの「わからない」率を並べて出す',
-  eff.indexOf('自動データを添えた質問') > 0 && eff.indexOf('添えなかった質問') > 0, eff);
+check('材料があった日と無かった日を並べて出す',
+  eff.indexOf('材料があった日') > 0 && eff.indexOf('材料が無かった日') > 0, eff);
+check('「その日は記録がありませんでした」を材料ありに数えない（数字が意味を失う）',
+  eff.indexOf('材料があった日：20件') > 0 && eff.indexOf('材料が無かった日：20件') > 0, eff);
+check('種類の違う質問（シフト希望など）を比較に混ぜない',
+  eff.indexOf('50件') < 0 && eff.indexOf('30件') < 0, eff);
 check('効いていれば「役に立っています」と言い切る',
   eff.indexOf('役に立っています') > 0, eff);
 check('何ポイント差かを数字で出す', /\d+(\.\d)?ポイント/.test(eff), eff);
 
 // 逆に差が無ければ「止めても影響が小さい」と言う（費用の判断ができるように）
 run(`deleteRowsWhere_(SHEETS.TASK, function(r){ return String(r['task_id']).indexOf('ZZE') === 0; })`);
-for (let i = 0; i < 20; i++) putTask(true, i < 4, 300 + i);
-for (let i = 0; i < 20; i++) putTask(false, i < 4, 400 + i);
+for (let i = 0; i < 20; i++) putTask('ref', i < 4, 300 + i);
+for (let i = 0; i < 20; i++) putTask('none', i < 4, 400 + i);
 const eff2 = run('effectLines_()').join('\n');
 check('差が無ければ、止めてよいとはっきり言う',
   eff2.indexOf('差はほとんどありません') > 0 && eff2.indexOf('止めても影響が小さい') > 0, eff2);

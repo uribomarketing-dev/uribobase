@@ -7,8 +7,14 @@
  * 効いていないものに払い続けるか、効いているものを止めてしまう。
  *
  * AI Uriboは、質問に自動データを「（参考）」として添えることがある。
- * 添えた質問と、添えなかった質問で **「わからない」の割合を比べれば**、
- * その材料が実際に現場の役に立ったかが数字で出る。
+ * ただし材料が無い日は「その日の自動記録はありませんでした」と正直に書いて送っている。
+ *
+ * そこで比べるのは **同じ種類の質問の中で、材料があった日と無かった日** である。
+ *   ・材料があった日の「わからない」率
+ *   ・材料が無かった日の「わからない」率
+ *
+ * 「材料を添える質問」と「そもそも添えない質問（シフト希望など）」を比べてしまうと、
+ * 質問の種類の違いを材料の効果と読み違える。それでは費用の判断材料にならない。
  * 現場に余計な操作をさせずに、勝手に貯まる指標なのが利点。
  *
  * 材料が効いていれば「わからない」が減る。減っていなければ、
@@ -25,9 +31,13 @@ var EFFECT_MIN_SAMPLES = 15;
  * @return {{withRef:Object, without:Object, ready:boolean}} 集計結果
  */
 function effectStats_(from, to) {
+  // 「（参考）」が付く質問だけを対象にする＝同じ種類の質問どうしで比べるため。
+  // 材料が無い日も「ありませんでした」と書いて送っているので、同じ土俵に乗っている
   var tasks = findRows(SHEETS.TASK, function (r) {
     var d = toDateTimeStr_(r['送信日時']).substring(0, 10);
-    return d && d >= from && d <= to && String(r['回答'] || '').trim();
+    if (!d || d < from || d > to) return false;
+    if (!String(r['回答'] || '').trim()) return false;
+    return String(r['送信本文'] || '').indexOf('（参考）') >= 0;
   });
 
   var acc = function () { return { 件数: 0, わからない: 0 }; };
@@ -35,9 +45,10 @@ function effectStats_(from, to) {
   var without = acc();
 
   tasks.forEach(function (t) {
-    // 送信本文に「（参考）」が入っていれば、材料を添えて送った質問。
-    // 専用の列を足さずに済むよう、送った文面そのものから判定する
-    var box = (String(t['送信本文'] || '').indexOf('（参考）') >= 0) ? withRef : without;
+    // 「…はありませんでした」＝その日は材料が無かった。ここを取り違えると
+    // 「材料あり」に材料の無い日が混ざり、数字が意味を失う
+    var body = String(t['送信本文'] || '');
+    var box = (body.indexOf('ありませんでした') >= 0) ? without : withRef;
     box.件数++;
     var ans = String(t['回答']).split('／')[0];
     if (UNKNOWN_ANSWERS.indexOf(ans) >= 0) box.わからない++;
@@ -82,9 +93,9 @@ function effectLines_(days) {
 
   var a = ratePct_(s.withRef.わからない, s.withRef.件数);
   var b = ratePct_(s.without.わからない, s.without.件数);
-  lines.push('自動データを添えた質問：' + s.withRef.件数 + '件 → わからない '
+  lines.push('材料があった日：' + s.withRef.件数 + '件 → わからない '
     + s.withRef.わからない + '件（' + a + '%）');
-  lines.push('添えなかった質問　　：' + s.without.件数 + '件 → わからない '
+  lines.push('材料が無かった日：' + s.without.件数 + '件 → わからない '
     + s.without.わからない + '件（' + b + '%）');
   lines.push('');
 
@@ -122,7 +133,10 @@ function effectBySourceLines_(days) {
   var counts = {};
   findRows(SHEETS.TASK, function (r) {
     var d = toDateTimeStr_(r['送信日時']).substring(0, 10);
-    return d && d >= from && d <= to && String(r['送信本文'] || '').indexOf('（参考）') >= 0;
+    if (!d || d < from || d > to) return false;
+    var body = String(r['送信本文'] || '');
+    // 材料が無かった日は数えない（「何件に材料を添えられたか」を見る欄なので）
+    return body.indexOf('（参考）') >= 0 && body.indexOf('ありませんでした') < 0;
   }).forEach(function (t) {
     // 「（参考）夜間の動き：…」の項目名だけを取り出す
     var m = String(t['送信本文']).match(/（参考）([^：\n]+)[：\n]/);

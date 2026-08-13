@@ -151,7 +151,8 @@ function referenceLogText_(gap, check) {
 
   // 夜間の動きのように1晩に何度も入るものは、まとめて時系列で見せる
   var MAX = 5;
-  var values = use.map(function (r) { return String(r['値']); });
+  // 1件あたりも長すぎると質問本体が埋もれる。読める長さに切る
+  var values = use.map(function (r) { return truncate_(String(r['値']), 60); });
   var shown = values.slice(0, MAX);
   var more = values.length - shown.length;
   var body = (values.length === 1) ? shown[0] : shown.join('／');
