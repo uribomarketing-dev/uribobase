@@ -68,6 +68,52 @@ function setSecrets(values) {
 }
 
 /**
+ * Webhookの秘密キーを作り直す。
+ *
+ * この鍵は、ウェブアプリURLの末尾に付けて「LINE以外からの投稿を弾く」ためのもの。
+ * 画面に一度表示されるので、うっかり人に見せてしまうことがある。
+ * その場合は作り直せば、古い鍵での投稿は通らなくなる。
+ *
+ * ⚠ 作り直したら、**LINE DevelopersのWebhook URLと、AIハブのsecrets.yamlを
+ *   新しい鍵に貼り替えるまで、外からの受け付けは止まる**（受け取らない方が安全なため）。
+ * @return {string} 新しい鍵と、貼り替え先の案内
+ */
+function rotateWebhookSecret() {
+  var proc = 'rotateWebhookSecret';
+  var props = PropertiesService.getScriptProperties();
+  var key = makeSecret_();
+  props.setProperty(PROP.WEBHOOK_KEY, key);
+  logInfo(proc, 'Webhook秘密キーを作り直しました（値はログに残しません）');
+
+  // 保存してあるURLは古い鍵付き（…/exec?k=旧キー）なので、?以降を落としてから付け直す
+  var saved = String(props.getProperty('WEBAPP_URL') || '');
+  var base = saved ? saved.split('?')[0] : '＜ウェブアプリのURL＞';
+  if (saved) props.setProperty('WEBAPP_URL', base + '?k=' + key);
+  var url = base;
+  return '新しいWebhook用の秘密キー：\n' + key + '\n\n'
+    + '次の2か所を、新しいURLに貼り替えてください。貼り替えるまで受け付けは止まります。\n\n'
+    + '① LINE Developers → Messaging API設定 → Webhook URL\n'
+    + '　 ' + url + '?k=' + key + '\n\n'
+    + '② AIハブ /config/secrets.yaml の ai_uribo_url\n'
+    + '　 （同じURLに書き替えて、開発者ツール→YAMLの再読み込み）';
+}
+
+/**
+ * メニューからWebhookの秘密キーを作り直す。
+ * @return {void}
+ */
+function menuRotateWebhookSecret_() {
+  var ui = SpreadsheetApp.getUi();
+  var res = ui.alert('Webhook秘密キーの作り直し',
+    '鍵を新しくします。\n\n'
+    + '貼り替えが済むまで、LINEからの操作とAIハブからの取り込みは止まります'
+    + '（不正な投稿を受け取らないための動きです）。\n\n実行しますか？',
+    ui.ButtonSet.OK_CANCEL);
+  if (res !== ui.Button.OK) return;
+  ui.alert('新しい秘密キー', rotateWebhookSecret(), ui.ButtonSet.OK);
+}
+
+/**
  * メニューから秘密情報を入力する。
  * @return {void}
  */

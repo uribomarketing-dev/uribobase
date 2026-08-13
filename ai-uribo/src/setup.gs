@@ -367,6 +367,7 @@ function onOpen() {
     .addItem('今日の夜勤を確認する', 'menuNightShift_')
     .addSeparator()
     .addItem('貼り付けを確認する', 'menuVerifyPaste_')
+    .addItem('Webhook秘密キーを作り直す', 'menuRotateWebhookSecret_')
     .addItem('診断情報をコピー', 'menuDiagnostics_')
     .addItem('通し試験を実行（実機確認）', 'menuSelfTest_')
     .addSeparator()

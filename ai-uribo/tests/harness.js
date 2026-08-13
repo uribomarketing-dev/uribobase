@@ -1328,6 +1328,28 @@ run(`(function(){
   var s=findRow(SHEETS.STAFF,{'staff_id':'STF002'});updateRow(SHEETS.STAFF,s._row,{'line_user_id':'U_HATT'});
 })()`);
 
+console.log('\n=== T34 Webhook秘密キーの作り直し ===');
+// この鍵は画面に一度表示されるので、うっかり人に見せてしまうことがある。
+// そのときに作り直せることと、貼り替え先が分かることが要る
+props.WEBAPP_URL = 'https://script.google.com/macros/s/AAA/exec?k=oldkey123';
+const oldKey = props.WEBHOOK_SECRET;
+const rot = String(run('rotateWebhookSecret()'));
+check('新しい鍵を作る', props.WEBHOOK_SECRET !== oldKey && /^[A-Za-z2-9]{24}$/.test(props.WEBHOOK_SECRET),
+  props.WEBHOOK_SECRET);
+const asReq = (k) => JSON.stringify({ parameter: { k }, postData: { contents: '{"events":[]}' } });
+check('古い鍵では通らなくなる', run(`verifyRequest_(${asReq('oldkey123')})`) === false);
+check('新しい鍵なら通る', run(`verifyRequest_(${asReq(props.WEBHOOK_SECRET)})`) === true);
+check('保存してあるURLも新しい鍵に更新する（古い鍵が残らない）',
+  props.WEBAPP_URL.indexOf('oldkey123') < 0 && props.WEBAPP_URL.indexOf(props.WEBHOOK_SECRET) > 0,
+  props.WEBAPP_URL);
+check('貼り替える場所を2か所とも案内する',
+  rot.indexOf('LINE Developers') > 0 && rot.indexOf('secrets.yaml') > 0, rot.substring(0, 200));
+check('貼り替えるまで受け付けが止まることを伝える', rot.indexOf('止まります') > 0);
+// 後片付け：鍵を元に戻す（戻さないと以降のテストが全部「鍵が違う」で落ちる）
+props.WEBHOOK_SECRET = oldKey;
+delete props.WEBAPP_URL;
+check('後片付け：鍵を元に戻した', props.WEBHOOK_SECRET === oldKey);
+
 console.log('\n=== T33 拠点が2つになっても、材料が混ざらない ===');
 // 清水にもハブを入れた瞬間に静かに壊れる箇所を、1拠点のうちに塞いでおく。
 // 共用部のカメラは「誰の」かまでは分からないので、拠点あてで入ってくる
