@@ -1322,6 +1322,60 @@ run(`(function(){
   var s=findRow(SHEETS.STAFF,{'staff_id':'STF002'});updateRow(SHEETS.STAFF,s._row,{'line_user_id':'U_HATT'});
 })()`);
 
+console.log('\n=== T31 自動データが黙って止まったら気づく ===');
+// いちばん怖い壊れ方はエラーではなく「沈黙」。SDが埋まる・電源が抜ける・Wi-Fiが変わる。
+// どれも画面には何も出ず、記録だけが静かに薄くなる
+const hoursAgo = (h) => run(`Utilities.formatDate(new Date(new Date().getTime() - ${h}*3600000), TZ, 'yyyy-MM-dd HH:mm')`);
+const putSourceLogs = (src, stamps) => run(`(function(){
+  ${JSON.stringify(stamps)}.forEach(function(t){
+    appendRow(SHEETS.LOG_IMPORT, {log_id:'', 発生日:t.substring(0,10), 対象種別:'raw_test',
+      対象:'ALL', 項目名:'ZZ_ALIVE', 値:'x', 取込元:${JSON.stringify(src)}, 取込日時:t});
+  });
+})()`);
+// 配列は参照で渡せないので、中で作って返させる
+const runAlive = () => run(`(function(){ var a=[]; checkSourcesAlive_(a); return a; })()`);
+
+// ① 5件未満なら、まだ「普段の間隔」が分からないので騒がない
+putSourceLogs('zz_new', [hoursAgo(300), hoursAgo(250)]);
+check('データが少ないうちは沈黙を疑わない（設定直後に騒がない）',
+  runAlive().every(m => String(m).indexOf('zz_new') < 0), runAlive());
+
+// ② 1時間おきに来ていたものが丸1日止まったら気づく
+putSourceLogs('zz_hourly', [30,29,28,27,26,25,24].map(h => hoursAgo(h)));
+const silentMsgs = runAlive();
+check('普段1時間おきのものが1日止まったら知らせる',
+  silentMsgs.some(m => String(m).indexOf('zz_hourly') >= 0), silentMsgs);
+check('何時間止まっているか・普段どれくらいかを書く',
+  silentMsgs.some(m => /\d+時間止まって/.test(String(m)) && String(m).indexOf('普段は約') > 0), silentMsgs);
+
+// ③ 普段どおり届いているものは鳴らさない
+putSourceLogs('zz_ok', [6,5,4,3,2,1].map(h => hoursAgo(h)));
+check('普段どおり届いているものでは鳴らさない',
+  runAlive().every(m => String(m).indexOf('zz_ok') < 0), runAlive());
+
+// ④ もともと間隔が長いもの（1日1回）は、半日空いた程度で鳴らさない
+putSourceLogs('zz_daily', [24*6, 24*5, 24*4, 24*3, 24*2, 12].map(h => hoursAgo(h)));
+check('もともと1日1回のものを、半日の間隔で誤報しない',
+  runAlive().every(m => String(m).indexOf('zz_daily') < 0), runAlive());
+
+// ⑤ AIハブは原因と確かめ方まで書く（現場が動けるように）
+putSourceLogs('frigate', [30,29,28,27,26,25,24].map(h => hoursAgo(h)));
+const hubMsg = runAlive().filter(m => String(m).indexOf('frigate') >= 0)[0] || '';
+check('AIハブが止まったら、よくある原因を挙げる',
+  String(hubMsg).indexOf('microSD') > 0 && String(hubMsg).indexOf('電源') > 0, hubMsg);
+check('自分で確かめられるURLまで書く',
+  String(hubMsg).indexOf('192.168.1.13:5000') > 0, hubMsg);
+
+// ⑥ 人が手で貼るものは、届かなくても異常ではない
+putSourceLogs('summary', [200,190,180,170,160,150].map(h => hoursAgo(h)));
+check('手で貼り付けるもの（AIまとめ等）は沈黙を責めない',
+  runAlive().every(m => String(m).indexOf('summary') < 0), runAlive());
+
+// 後片付け（他のテストに影響させない）
+run(`deleteRowsWhere_(SHEETS.LOG_IMPORT, function(r){ return String(r['項目名'])==='ZZ_ALIVE'; })`);
+check('試験で入れた行を片付ける',
+  rows('LOG_IMPORT').every(r => String(r.項目名) !== 'ZZ_ALIVE'));
+
 console.log('\n=== T30 共用部カメラの動きが夜勤の質問に添えられる ===');
 // 夜勤でいちばん辛いのは「思い出して書く」こと。
 // Frigateが拾った時刻を質問に添えて、記憶ではなく事実から答えられるようにする

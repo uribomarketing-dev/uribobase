@@ -170,6 +170,8 @@ var DEFAULT_SETTINGS = [
   ['learn_promote_rate', '0.9', 'この正答率以上なら「自動確定」に昇格（＝その質問をしなくなる）'],
   ['learn_demote_rate', '0.6', 'この正答率を下回ったら「要見直し」に降格（＝必ず人に聞く）'],
   ['learn_spotcheck_every', '20', '自動確定になった後も、この件数に1回は抜き打ちで人に確認する（精度の劣化に気づくため）'],
+  ['source_alive_lookback_days', '30', '自動データの「普段の間隔」を測る期間'],
+  ['source_silent_min_hours', '6', '自動データが止まったと判断する最短の沈黙時間'],
   ['selfcheck_hour', '8', '自己点検の実行時刻（朝バッチの前に、システム自身の状態を点検する）'],
   ['archive_enabled', 'TRUE', '古い行を「_保管」シートへ自動で移すか（台帳が重くなるのを防ぐ。消しはしない）'],
   ['archive_after_days', '180', '実績ログ・完了した不足・回答済みの確認を、何日過ぎたら保管へ移すか'],
@@ -6335,6 +6337,7 @@ function selfCheckBody_(proc) {
   safely_(proc, function () { checkStuckQueue_(issues); });
   safely_(proc, function () { checkTestMode_(issues); });
   safely_(proc, function () { checkDevices_(issues); });
+  safely_(proc, function () { checkSourcesAlive_(issues); });
   safely_(proc, function () { checkLearning_(issues); });
   safely_(proc, function () { checkSheetSize_(issues); });
   safely_(proc, function () { checkSlowBatch_(issues); });
@@ -6505,6 +6508,107 @@ function checkDevices_(issues) {
       + silent.slice(0, 5).map(function (d) { return String(d['deviceName']); }).join('・')
       + '（電池切れ・置き場所の変更かもしれません）');
   }
+}
+
+/**
+ * 自動で入ってくるデータが「いつの間にか止まっていないか」を見る。
+ *
+ * いちばん怖い壊れ方は、エラーではなく**沈黙**である。
+ * AIハブのSDカードが埋まる、電源が抜ける、Wi-Fiが変わる、Frigateが落ちる——
+ * どれも画面上は何も起きず、質問だけが「材料なし」で届き続け、
+ * 記録が静かに薄くなっていく。現場からは絶対に気づけない。
+ *
+ * そこで、取込元ごとに「普段どれくらいの間隔で届いているか」を自分で測り、
+ * その間隔から見て明らかに長い沈黙が続いていたら知らせる。
+ * しきい値を人が決めなくてよいので、ソースが増えても設定はいらない。
+ *
+ * @param {Array.<string>} issues 要対応の配列（追記される）
+ * @return {void}
+ */
+function checkSourcesAlive_(issues) {
+  var days = getSettingNum('source_alive_lookback_days', 30);
+  var minHours = getSettingNum('source_silent_min_hours', 6);
+  var since = addDays_(todayStr_(), -days);
+
+  // 取込元ごとに到着時刻を集める（手で貼るものは対象外＝機械が定期的に入れるものだけ見る）
+  var bySource = {};
+  findRows(SHEETS.LOG_IMPORT, function (r) {
+    return toDateTimeStr_(r['取込日時']).substring(0, 10) >= since;
+  }).forEach(function (r) {
+    var src = String(r['取込元'] || '').split(':')[0].trim();
+    if (!src || MANUAL_SOURCES.indexOf(src) >= 0) return;
+    if (!bySource[src]) bySource[src] = [];
+    bySource[src].push(toDateTimeStr_(r['取込日時']));
+  });
+
+  Object.keys(bySource).forEach(function (src) {
+    var times = bySource[src].sort();
+    // 5件未満だと「普段の間隔」が分からない。まだ様子を見る（設定直後に騒がないため）
+    if (times.length < 5) return;
+
+    var gaps = [];
+    for (var i = 1; i < times.length; i++) {
+      var g = hoursBetween_(times[i - 1], times[i]);
+      if (g >= 0) gaps.push(g);
+    }
+    if (!gaps.length) return;
+    var typical = median_(gaps);
+    var silent = hoursSince_(times[times.length - 1]);
+
+    // 普段の3倍の沈黙、かつ最低でも6時間。ゆらぎで毎日鳴らないようにする
+    var limit = Math.max(typical * 3, minHours);
+    if (silent <= limit) return;
+
+    issues.push(sourceSilentMessage_(src, Math.round(silent), Math.round(typical * 10) / 10));
+  });
+}
+
+/** 人が手で貼り付けるもの（届かなくても異常ではない） @type {Array.<string>} */
+var MANUAL_SOURCES = ['summary', 'manual', '手入力', 'shift', 'openclaw'];
+
+/**
+ * 沈黙している取込元ごとに、現場が動ける文面を作る。
+ * @param {string} src 取込元
+ * @param {number} silentHours 何時間届いていないか
+ * @param {number} typicalHours 普段の間隔（時間）
+ * @return {string} 通知文
+ */
+function sourceSilentMessage_(src, silentHours, typicalHours) {
+  var head = '「' + src + '」からの取り込みが' + silentHours + '時間止まっています'
+    + '（普段は約' + typicalHours + '時間おき）。';
+  if (src === 'frigate') {
+    return head + '玉里のAIハブをご確認ください。'
+      + 'よくある原因は ①microSDの空き不足 ②ハブの電源 ③Wi-Fiの変更 の3つです。'
+      + 'ブラウザで http://192.168.1.13:5000/api/version が開けば、ハブ自体は生きています';
+  }
+  if (src.indexOf('switchbot') === 0) {
+    return head + 'SwitchBotの連携をご確認ください（トークンの失効・機器の電池切れが多いです）';
+  }
+  return head + '送り元のアプリが止まっていないかご確認ください';
+}
+
+/**
+ * 数値配列の中央値を返す（平均だと1回の長い停止に引きずられるため）。
+ * @param {Array.<number>} values 数値配列
+ * @return {number} 中央値
+ */
+function median_(values) {
+  var a = values.slice().sort(function (x, y) { return x - y; });
+  var m = Math.floor(a.length / 2);
+  return (a.length % 2) ? a[m] : (a[m - 1] + a[m]) / 2;
+}
+
+/**
+ * 2つの日時文字列の差を時間で返す。
+ * @param {string} from 開始日時
+ * @param {string} to 終了日時
+ * @return {number} 時間差（負なら-1）
+ */
+function hoursBetween_(from, to) {
+  var a = new Date(String(from).replace(' ', 'T') + ':00+09:00').getTime();
+  var b = new Date(String(to).replace(' ', 'T') + ':00+09:00').getTime();
+  if (isNaN(a) || isNaN(b)) return -1;
+  return (b - a) / 3600000;
 }
 
 /**
