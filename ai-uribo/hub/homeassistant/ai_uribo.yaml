@@ -106,6 +106,9 @@ timer:
   ai_uribo_day_cooldown:
     name: AI Uribo 日中検知クールダウン
     duration: "12:00:00"
+  ai_uribo_meal_cooldown:
+    name: AI Uribo 食事時間帯クールダウン
+    duration: "01:30:00"
 
 automation:
   # ---------------------------------------------------------------------------
@@ -191,7 +194,55 @@ automation:
             日中に在室を確認 {{ ts | timestamp_custom('%H:%M', true) }}（{{ cam }}）
 
   # ---------------------------------------------------------------------------
-  # ③ AI+のシーン検知を受ける枠（例：配膳）
+  # ③ 食事の時間帯に、食卓のあたりで人を検知したら記録する（無料・AI+不要）
+  #
+  #    実機のFrigateは dining table / chair / bowl / microwave / refrigerator を
+  #    検出できている＝この画角は食卓と台所を捉えている。
+  #    ただし「配膳した」と言い切れるのはAI+のVLMだけなので、
+  #    ここで残すのは **時刻つきの事実（人が食卓のあたりに居た）** に留める。
+  #    それが「食事提供」の質問に（参考）として添えられ、人が確定させる。
+  # ---------------------------------------------------------------------------
+  - id: ai_uribo_meal_window_presence
+    alias: "AI Uribo：食事の時間帯の動きを記録"
+    mode: single
+    triggers:
+      - trigger: state
+        entity_id: sensor.ai_uribo_frigate_last_person
+    conditions:
+      - condition: template
+        value_template: >-
+          {{ trigger.to_state.state not in ['none', 'unknown', 'unavailable', '']
+             and state_attr('sensor.ai_uribo_frigate_last_person','start_time') is not none }}
+      # 朝 6:00-8:29 ／ 昼 11:00-13:29 ／ 夕 17:00-19:29
+      - condition: template
+        value_template: >-
+          {% set t = state_attr('sensor.ai_uribo_frigate_last_person','start_time') | float %}
+          {% set h = t | timestamp_custom('%H', true) | int %}
+          {{ (h >= 6 and h < 9) or (h >= 11 and h < 14) or (h >= 17 and h < 20) }}
+      - condition: state
+        entity_id: timer.ai_uribo_meal_cooldown
+        state: "idle"
+    actions:
+      - action: timer.start
+        target:
+          entity_id: timer.ai_uribo_meal_cooldown
+      - variables:
+          ts: "{{ state_attr('sensor.ai_uribo_frigate_last_person','start_time') | float }}"
+          cam: "{{ states('sensor.ai_uribo_frigate_camera_label') }}"
+          meal: >-
+            {% set h = state_attr('sensor.ai_uribo_frigate_last_person','start_time')
+                       | float | timestamp_custom('%H', true) | int %}
+            {{ '朝食' if h < 9 else ('昼食' if h < 14 else '夕食') }}
+      - action: rest_command.ai_uribo_observe
+        data:
+          date: "{{ ts | timestamp_custom('%Y-%m-%d', true) }}"
+          target: "ALL"
+          item: "食事時間帯の動き"
+          value: >-
+            {{ meal }}の時間帯に食卓のあたりで動きあり {{ ts | timestamp_custom('%H:%M', true) }}（{{ cam }}）
+
+  # ---------------------------------------------------------------------------
+  # ④ AI+のシーン検知を受ける枠（例：配膳）
   #    ※ AI+の検知がHome Assistantに来るかは未確認。
   #      有効にするには entity_id を実機の名前に直して、コメントを外す
   # ---------------------------------------------------------------------------
