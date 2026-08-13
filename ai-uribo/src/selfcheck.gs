@@ -275,9 +275,11 @@ function checkSiteNames_(issues) {
 
   var names = Object.keys(odd);
   if (!names.length) return;
-  issues.push('拠点名の書き方がそろっていません：'
+  issues.push('利用者マスタに無い拠点名が使われています：'
     + names.map(function (n) { return '「' + n + '」（' + odd[n] + '）'; }).join('・')
-    + '。S2_利用者マスタの拠点（' + Object.keys(known).join('・') + '）と同じ書き方に直してください');
+    + '。S2_利用者マスタの拠点は（' + Object.keys(known).join('・') + '）です。'
+    + '書き方のゆれ（例：清水／うりぼベース清水）か、その拠点の利用者がまだ未登録かのどちらかです'
+    + '。放っておくと、その拠点の記録が誰にも結びつきません');
 }
 
 /**

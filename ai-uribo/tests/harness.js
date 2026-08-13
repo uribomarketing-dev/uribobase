@@ -1159,6 +1159,54 @@ check('自己点検が処理の遅れに気づいて知らせる',
 check('実行にかかった秒数が実行ログに残る（遅くなってきたら分かる）',
   String(run('morningBatch()')).indexOf('秒') > 0);
 
+console.log('\n=== T27 給与ソフトのシフトをそのまま貼る ===');
+// 給与計算ソフトの書き出しは形がまちまち。どれで貼られても読めるようにしてある
+const csvShift = [
+  '日付,氏名,勤務区分',
+  '2026-11-01,服部俊喜,夜勤',
+  '2026-11-02,服部俊喜,明け',
+  '2026-11-02,藤原寛,日勤',
+  '2026-11-03,服部俊喜,公休',
+  '2026-11-04,山田太郎,夜勤'
+].join('\n');
+const csvRes = run(`importShiftText(${JSON.stringify(csvShift)})`);
+check('見出し付きCSVを読める（列の並びを見て自分で合わせる）',
+  csvRes.形式 === 'CSV' && csvRes.追加 === 3, csvRes);
+check('拠点の列が無くても、その人のS1の拠点を使う',
+  rows('SHIFT_PLAN').some(r => toStr(r.日付) === '2026-11-01' && r.staff_id === 'STF002' && r.拠点 === '清水'),
+  rows('SHIFT_PLAN').filter(r => String(toStr(r.日付)).indexOf('2026-11') === 0));
+check('休みの行は取り込まない',
+  !rows('SHIFT_PLAN').some(r => toStr(r.日付) === '2026-11-03'));
+check('スタッフ一覧に無い人は、行ごと理由を返す',
+  csvRes.読めなかった行.some(l => l.indexOf('山田太郎') >= 0), csvRes.読めなかった行);
+// 2交代の「明け」は朝で終わる勤務。その日の夜勤担当にすると、実際に泊まった人とずれる
+check('「明け」はその晩の夜勤として扱わない',
+  run(`isNightKind_('明け')`) === false && run(`isNightKind_('夜勤')`) === true
+    && run(`isNightKind_('夜')`) === true);
+check('「夜」だけの書き方でも夜勤と分かる（給与ソフトの記号に合わせる）',
+  run(`(function(){ return fillNightStaffFromShift_('2026-11-01'); })()`) === 1);
+
+// 月間シフト表（横に日付が並ぶ形）
+const matrix = [
+  '2026年11月',
+  ['氏名', 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20].join('\t'),
+  ['服部俊喜', '夜', '明', '休', '日', '夜', '明', '休', '休', '夜', '明', '休'].join('\t'),
+  ['藤原寛', '日', '日', '休', '夜', '明', '休', '日', '日', '休', '夜', '明'].join('\t')
+].join('\n');
+const matRes = run(`importShiftText(${JSON.stringify(matrix)})`);
+check('月間シフト表（横に日付が並ぶ形）も読める',
+  matRes.形式 === '月間シフト表' && matRes.追加 > 10, matRes);
+check('休みの記号（休・×・空欄）は飛ばす',
+  !rows('SHIFT_PLAN').some(r => toStr(r.日付) === '2026-11-12' && String(r.勤務区分) === '休'));
+check('その日の夜勤が誰か、月間表からも分かる',
+  String(run(`nightShiftReport_('2026-11-18')`)).indexOf('服部俊喜') > 0,
+  run(`nightShiftReport_('2026-11-18')`).substring(0, 200));
+check('同じ表を貼り直しても二重にならない',
+  run(`importShiftText(${JSON.stringify(matrix)})`).追加 === 0);
+// 手書きの形（日付 拠点 勤務区分 氏名）も今までどおり読める
+check('手で書いた形も今までどおり読める',
+  run(`importShiftText('2026-11-25 玉里 夜勤 藤原寛')`).追加 === 1);
+
 console.log('\n=== T26 今日は誰が夜勤か ===');
 // 夜の確認セットは夜勤の人に届く。誰が夜勤だと思われているかが見えないと、
 // 「送ったのに現場に届いていない」が静かに起きる
@@ -1489,7 +1537,7 @@ clearCache();
 pushes.length = 0;
 run('selfCheck()');
 check('拠点名のゆれに気づいて知らせる',
-  JSON.stringify(pushes).indexOf('拠点名の書き方がそろっていません') > 0
+  JSON.stringify(pushes).indexOf('利用者マスタに無い拠点名') > 0
     && JSON.stringify(pushes).indexOf('うりぼベース清水') > 0, JSON.stringify(pushes).substring(0, 300));
 run(`(function(){
   findRows(SHEETS.SHIFT_PLAN,function(r){return String(r['拠点'])==='うりぼベース清水';})
@@ -1498,8 +1546,8 @@ run(`(function(){
 clearCache();
 pushes.length = 0;
 run('selfCheck()');
-check('そろえれば指摘は消える',
-  JSON.stringify(pushes).indexOf('拠点名の書き方') < 0, JSON.stringify(pushes).substring(0, 200));
+check('そろえれば、その拠点名は指摘されなくなる',
+  JSON.stringify(pushes).indexOf('うりぼベース清水') < 0, JSON.stringify(pushes).substring(0, 300));
 
 console.log('\n=== T19 お返事が無い確認の聞き直し ===');
 // 一度送ったきり返事が無い確認を放置すると、記録が空いたまま週次まで埋もれる

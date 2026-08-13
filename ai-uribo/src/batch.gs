@@ -398,7 +398,7 @@ function nightShiftStaff_() {
   var today = todayStr_();
   var fromPlan = safely_('nightShiftStaff_', function () {
     return findRows(SHEETS.SHIFT_PLAN, function (r) {
-      return toDateStr_(r['日付']) === today && String(r['勤務区分']).indexOf('夜勤') >= 0;
+      return toDateStr_(r['日付']) === today && isNightKind_(r['勤務区分']);
     }).map(function (r) { return String(r['staff_id']); });
   }, []);
 
