@@ -116,6 +116,23 @@ HAは記録用データベースをmicroSDに書く。空き1.26GBでは数週�
 対策：①保存期間を3日に絞る設定を `hub/homeassistant/ai_uribo.yaml` に実装済み
 ②高耐久microSD 128GB以上への差し替え（買えた日で可）
 
+## Q12c. 【解決】切り分けの結果（2026-08-13 18:01）
+
+| 確認 | 結果 |
+|---|---|
+| `http://192.168.1.13:8123` | **開いた**（ただしHAは未セットアップ→その場で初期設定を実施） |
+| HAの統合・デバイス | **標準のものだけ**（Met.no／Google Translate TTS／Radio Browser／Sun／Cast）。<br>**MQTT・Frigate・SwitchBotは無し** |
+| `http://192.168.1.13:5000/api/version` | **`0.16.0-c2f8de9` を返した＝Frigateは生きている**。認証不要 |
+
+**→ MQTTを使わない設計に切り替えた。**
+`hub/homeassistant/ai_uribo.yaml` は、FrigateのAPI（`/api/events?label=person&limit=1`）を
+5分ごとに読む方式に書き換え済み。統合を足す必要がない。
+記録する時刻はFrigateの検出時刻（`start_time`）を使うので、**5分の読み取り間隔があっても
+記録の時刻はずれない**。
+
+**残る未確認：Frigateにカメラが登録されているか。**
+`http://192.168.1.13:5000/api/events?limit=3` が `[]` なら、まだ何も検出していない。
+
 ## Q12. 次の切り分け（2分・誰でもできる）
 
 **玉里のWi-Fiに繋いだ状態で**、Safariで順に開く。アプリ内ブラウザではなくSafariで。
