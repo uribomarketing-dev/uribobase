@@ -167,6 +167,12 @@ const sandbox = {
   },
   UrlFetchApp: {
     fetch: (url, opts) => {
+      // トークンの生存確認（メッセージは送らない）
+      if (url.indexOf('/v2/bot/info') >= 0) {
+        return sandbox.__lineInfoCode === 401
+          ? { getResponseCode: () => 401, getContentText: () => '{"message":"Invalid token"}' }
+          : { getResponseCode: () => 200, getContentText: () => '{"displayName":"うりぼシフト管理"}' };
+      }
       const payload = JSON.parse(opts.payload);
       if (url.indexOf('/push') >= 0) pushes.push(payload); else replies.push(payload);
       return { getResponseCode: () => 200, getContentText: () => '{}' };
@@ -182,6 +188,7 @@ const sandbox = {
   },
   Session: { getScriptTimeZone: () => 'Asia/Tokyo' },
   __triggers: [],
+  __lineInfoCode: 200,
   __lockBusy: false
 };
 function mockFolder(name) {
@@ -192,7 +199,7 @@ function mockFolder(name) {
     createFolder: n => (folders[n] = mockFolder(n)),
     getFolders: () => iter(Object.values(folders)),
     getFilesByName: n => iter(files[n] ? [files[n]] : []),
-    createFile: blob => (files[blob.name] = { name: blob.name, setTrashed: () => { } }),
+    createFile: blob => (files[blob.name] = { name: blob.name, setTrashed: () => { delete files[blob.name]; } }),
     moveTo: () => { }, setTrashed: () => { }
   };
   return f;
@@ -200,7 +207,7 @@ function mockFolder(name) {
 function iter(arr) { let i = 0; return { hasNext: () => i < arr.length, next: () => arr[i++] }; }
 
 vm.createContext(sandbox);
-['config', 'db', 'log', 'notify', 'setup', 'learn', 'autofill', 'detect', 'ask', 'batch', 'webhook', 'backup', 'diagnose', 'switchbot', 'selfcheck', 'users', 'consistency', 'correct', 'api', 'monthly', 'shift'].forEach(f => {
+['config', 'db', 'log', 'notify', 'setup', 'learn', 'autofill', 'detect', 'ask', 'batch', 'webhook', 'backup', 'diagnose', 'switchbot', 'selfcheck', 'users', 'consistency', 'correct', 'api', 'monthly', 'shift', 'selftest'].forEach(f => {
   vm.runInContext(fs.readFileSync(path.join(SRC, f + '.gs'), 'utf8'), sandbox, { filename: f + '.gs' });
 });
 
@@ -1151,6 +1158,40 @@ check('自己点検が処理の遅れに気づいて知らせる',
   JSON.stringify(pushes).indexOf('時間内に終わらず') > 0, JSON.stringify(pushes).substring(0, 300));
 check('実行にかかった秒数が実行ログに残る（遅くなってきたら分かる）',
   String(run('morningBatch()')).indexOf('秒') > 0);
+
+console.log('\n=== T23 通し試験（実機確認をシステム自身がやる） ===');
+// 実機でしか分からないことを、1回の実行で確かめられるようにしたもの
+run(`(function(){
+  var r=findRow(SHEETS.SETTING,{'キー':'test_mode'});updateRow(SHEETS.SETTING,r._row,{'値':'FALSE'});
+  clearSettingCache();
+})()`);
+pushes.length = 0;
+const stReport = run('selfTest()');
+check('全項目が通り、レポートが返る',
+  String(stReport).indexOf('すべて通りました') > 0, String(stReport).substring(0, 600));
+check('試験中はテストモードにする（現場にLINEを飛ばさない）',
+  pushes.length === 0 && run(`getSetting('test_mode')`) === 'TRUE', pushes.length);
+check('LINEのトークンが生きているかを、送信せずに確かめる',
+  String(stReport).indexOf('LINEの接続：つながりました') > 0, String(stReport).substring(0, 400));
+check('試験で作った行は後片付けされる',
+  String(stReport).indexOf('後片付け：完了') > 0
+    && !rows('GAP').some(g => String(g.gap_id).indexOf('ZZ_SELFTEST') >= 0)
+    && !rows('USER').some(u => String(u.user_code).indexOf('ZZ_SELFTEST') >= 0),
+  rows('GAP').filter(g => String(g.gap_id).indexOf('ZZ_SELFTEST') >= 0));
+check('終わってもテストモードは戻さない（勝手に本番へ切り替えない）',
+  String(stReport).indexOf('テストモードはONのままです') > 0);
+
+// 直すべきことがあれば、直し方まで書いて返す
+sandbox.__lineInfoCode = 401;
+const stNg = run('selfTest()');
+sandbox.__lineInfoCode = 200;
+check('トークンが無効なら、そう言って直し方を示す',
+  String(stNg).indexOf('トークンが無効です') > 0
+    && String(stNg).indexOf('直していただきたいこと') > 0, String(stNg).substring(0, 500));
+run(`(function(){
+  var r=findRow(SHEETS.SETTING,{'キー':'test_mode'});updateRow(SHEETS.SETTING,r._row,{'値':'FALSE'});
+  clearSettingCache();
+})()`);
 
 console.log('\n=== T22 実データ量での処理量（6分制限への備え） ===');
 // 件数が増えたときに処理量が跳ね上がる（O(n^2)になる）と、いつか6分の制限に当たる。

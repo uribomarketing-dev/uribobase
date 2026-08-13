@@ -301,6 +301,7 @@ function onOpen() {
     .addItem('シフト表を取り込む', 'menuImportShift_')
     .addSeparator()
     .addItem('診断情報をコピー', 'menuDiagnostics_')
+    .addItem('通し試験を実行（実機確認）', 'menuSelfTest_')
     .addSeparator()
     .addItem('朝バッチを今すぐ実行', 'morningBatch')
     .addItem('夜の確認セットを今すぐ実行', 'nightBatch')
