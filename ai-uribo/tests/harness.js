@@ -281,6 +281,8 @@ run(`(function(){
 console.log('\n=== T2 登録コードによる本人確認と紐付け ===');
 props.LINE_CHANNEL_TOKEN = 'dummy-token';
 const post = (events, key = 'k123') => run(`doPost(${JSON.stringify({ parameter: { k: '__KEY__' }, postData: { contents: JSON.stringify({ events }) } })})`.replace('__KEY__', key));
+// LINE以外（AIハブなど）から届く本文をそのまま流し込む用
+const postBody = (body, key = 'k123') => run(`doPost(${JSON.stringify({ parameter: { k: '__KEY__' }, postData: { contents: JSON.stringify(body) } })})`.replace('__KEY__', key));
 
 // 秘密キー未設定なら全拒否（fail-close）
 replies.length = 0;
@@ -1319,6 +1321,56 @@ check('シフトの人がLINE未登録なら、そう分かるようにする',
 run(`(function(){
   var s=findRow(SHEETS.STAFF,{'staff_id':'STF002'});updateRow(SHEETS.STAFF,s._row,{'line_user_id':'U_HATT'});
 })()`);
+
+console.log('\n=== T30 共用部カメラの動きが夜勤の質問に添えられる ===');
+// 夜勤でいちばん辛いのは「思い出して書く」こと。
+// Frigateが拾った時刻を質問に添えて、記憶ではなく事実から答えられるようにする
+const camDate = run('addDays_(todayStr_(),-1)');
+run(`(function(){
+  var u=findRow(SHEETS.USER,{'user_code':'TEST01'});
+  updateRow(SHEETS.USER,u._row,{'有効':true,'拠点':'清水'});
+})()`);
+// AIハブ（Home Assistant）から届く形そのままで投入する
+[['00:15','front'],['02:40','living'],['04:30','living']].forEach(function (t, i) {
+  postBody({
+    source: 'frigate',
+    observations: [{ date: camDate, target: 'ALL', item: '夜間の動き',
+                     value: '共用部で動きあり ' + t[0] + '（' + t[1] + '）' }]
+  });
+});
+const camLogs = rows('LOG_IMPORT').filter(r => String(r.取込元) === 'frigate');
+check('AIハブからの観察がそのままの形で取り込まれる', camLogs.length === 3, camLogs.length);
+check('画像ではなく言葉と時刻だけが入る',
+  camLogs.every(r => /\d\d:\d\d/.test(String(r.値)) && String(r.値).indexOf('http') < 0));
+
+// 自動充足：共用部の映像から利用者ごとの記録を勝手に作らないこと
+run(`runAutoFill('${camDate}')`);
+const madeUp = rows('FILL').filter(r => toStr(r.発生日) === camDate
+  && String(r.情報源 || '').indexOf('frigate') >= 0 && String(r.対象) !== 'ALL');
+check('共用部の映像から、利用者個人の記録を勝手に作らない', madeUp.length === 0,
+  madeUp.map(r => r.対象 + '/' + r.項目名));
+
+// 質問に添えられるか（ここが本命）
+const patrolGap = { '対象日': camDate, '対象': 'TEST01' };
+const refText = run(`referenceLogText_(${JSON.stringify(patrolGap)}, checkById_('CHK102'))`);
+check('夜間巡回の質問に、その晩の動きが時刻つきで添えられる',
+  String(refText).indexOf('00:15') > 0 && String(refText).indexOf('02:40') > 0
+    && String(refText).indexOf('04:30') > 0, refText);
+check('拠点共通（ALL）のログでも、利用者あての質問に添えられる',
+  String(refText).indexOf('（参考）') === 0, refText);
+check('CHK102に参照ログが設定されている',
+  String(run(`checkById_('CHK102')['参照ログ']`)) === '夜間の動き');
+// 6件以上あっても質問が長くなりすぎないこと
+[1,2,3].forEach(function (i) {
+  postBody({ source: 'frigate', observations: [{ date: camDate, target: 'ALL',
+    item: '夜間の動き', value: '共用部で動きあり 0' + i + ':05（living）' }] });
+});
+const refMany = String(run(`referenceLogText_(${JSON.stringify(patrolGap)}, checkById_('CHK102'))`));
+check('件数が多い晩は5件までにして「ほか◯件」とまとめる',
+  refMany.indexOf('ほか1件') > 0 && refMany.split('／').length === 5, refMany);
+check('自動記録が無い日は「ありませんでした」と正直に言う',
+  String(run(`referenceLogText_({'対象日':'2001-01-01','対象':'TEST01'}, checkById_('CHK102'))`))
+    .indexOf('ありませんでした') > 0);
 
 console.log('\n=== T29 勤務開始の1時間前に送る ===');
 // 21時固定だと、17時入りの人には遅すぎ（もう業務中）、22時入りの人には早すぎる。

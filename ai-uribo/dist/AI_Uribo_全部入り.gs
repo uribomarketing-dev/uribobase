@@ -232,9 +232,11 @@ var INITIAL_CHECKS = [
   //   選択肢は「事実」と「わからない」を分け、推測で埋めさせない（運用・監査レビューの反映）。
   ['CHK101', 'support', '在否確認', 'R02', '夜勤', 'A',
    '{対象}さんは{日付}、ホームにいらっしゃいましたか？', '在宅|外泊・帰省|入院|わからない', false],
+  // 夜の巡回は「思い出して書く」のがいちばん辛い。共用部カメラ・センサーの動きを
+  // 時刻つきで質問に添えて、記憶ではなく事実から答えられるようにする（参照ログ列）。
   ['CHK102', 'support', '夜間巡回・就寝確認', 'R02', '夜勤', 'A',
    '{対象}さんの{日付}夜（22時〜5時）の巡回・就寝確認について教えてください。',
-   '複数回まわった|1回まわった|できなかった|わからない', false],
+   '複数回まわった|1回まわった|できなかった|わからない', false, '夜間の動き'],
   ['CHK103', 'support', '支援内容', 'R02', '夜勤', 'A',
    '{対象}さんに{日付}行った支援があれば教えてください（声かけ・介助など）。',
    '支援あり（一言記入）|特記なし|わからない', false],
@@ -3946,17 +3948,33 @@ function buildQuestion_(task, gap, check, remain) {
 function referenceLogText_(gap, check) {
   var name = String(check['参照ログ'] || '').trim();
   if (!name) return '';
-  var row = safely_('referenceLogText_', function () {
-    return findRow(SHEETS.LOG_IMPORT, function (r) {
-      return toDateStr_(r['発生日']) === toDateStr_(gap['対象日'])
-        && String(r['項目名']) === name
-        && String(r['対象']) === String(gap['対象']);
+  var target = String(gap['対象']);
+  var rows = safely_('referenceLogText_', function () {
+    return findRows(SHEETS.LOG_IMPORT, function (r) {
+      if (toDateStr_(r['発生日']) !== toDateStr_(gap['対象日'])) return false;
+      if (String(r['項目名']) !== name) return false;
+      // その人あてのログを優先しつつ、拠点共通（ALL）のログも材料にする。
+      // 共用部のカメラは「誰の」かまでは分からないため、ALLで入ってくる
+      var t = String(r['対象']);
+      return t === target || t === 'ALL';
     });
-  }, null);
-  if (!row) {
+  }, []);
+  if (!rows.length) {
     return '（参考）' + toDateStr_(gap['対象日']) + ' の「' + name + '」の自動記録はありませんでした。';
   }
-  return '（参考）' + name + '：' + String(row['値']);
+
+  // その人あてのログがあれば、そちらだけを使う（ALLは補助）
+  var mine = rows.filter(function (r) { return String(r['対象']) === target; });
+  var use = mine.length ? mine : rows;
+
+  // 夜間の動きのように1晩に何度も入るものは、まとめて時系列で見せる
+  var MAX = 5;
+  var values = use.map(function (r) { return String(r['値']); });
+  var shown = values.slice(0, MAX);
+  var more = values.length - shown.length;
+  var body = (values.length === 1) ? shown[0] : shown.join('／');
+  if (more > 0) body += '　ほか' + more + '件';
+  return '（参考）' + name + '：' + body;
 }
 
 /**

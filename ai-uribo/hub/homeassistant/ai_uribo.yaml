@@ -1,0 +1,137 @@
+# =============================================================================
+# AI Uribo × AIハブ（Home Assistant 設定）
+#
+# 置き場所： /config/packages/ai_uribo.yaml
+#            configuration.yaml に次の3行が無ければ足す：
+#              homeassistant:
+#                packages: !include_dir_named packages
+#
+# 秘密情報は /config/secrets.yaml に置く（このファイルには書かない）：
+#   ai_uribo_url: "https://script.google.com/macros/s/＜デプロイID＞/exec?k=＜WEBHOOK_SECRET＞"
+#
+# 何をするか：
+#   Frigate（ローカル・無料）が共用部で人を検出したら、その「時刻つきの事実」だけを
+#   AI Uribo に送る。誰の記録にするかは決めない。翌朝の質問に「（参考）」として
+#   添えられ、夜勤者が1タップで確定させる。
+#
+#   画像・映像は一切送らない。送るのは言葉と時刻だけ。
+# =============================================================================
+
+rest_command:
+  ai_uribo_observe:
+    url: !secret ai_uribo_url
+    method: POST
+    content_type: "application/json"
+    timeout: 20
+    payload: >-
+      {"source":"frigate","observations":[{
+        "date":"{{ date }}",
+        "target":"{{ target | default('ALL') }}",
+        "item":"{{ item }}",
+        "value":"{{ value }}"
+      }]}
+
+# -----------------------------------------------------------------------------
+# 連投を防ぐためのタイマー。
+# 人が1回通っただけでFrigateは何件もイベントを出すので、
+# 15分に1件までにまとめる（記録として意味があるのは「何時ごろ動きがあったか」）
+# -----------------------------------------------------------------------------
+timer:
+  ai_uribo_night_cooldown:
+    name: AI Uribo 夜間検知クールダウン
+    duration: "00:15:00"
+  ai_uribo_day_cooldown:
+    name: AI Uribo 日中検知クールダウン
+    duration: "12:00:00"
+
+automation:
+  # ---------------------------------------------------------------------------
+  # ① 夜間（22:00〜5:00）に共用部で人を検出したら、時刻を記録する
+  #    → 翌朝の「夜間巡回・就寝確認」の質問に（参考）として付く
+  # ---------------------------------------------------------------------------
+  - id: ai_uribo_night_motion
+    alias: "AI Uribo：夜間の共用部の動きを記録"
+    mode: single
+    triggers:
+      - trigger: mqtt
+        topic: "frigate/events"
+    conditions:
+      # 新規イベントのうち、人の検出だけを拾う
+      - condition: template
+        value_template: >-
+          {{ trigger.payload_json.type == 'new'
+             and trigger.payload_json.after.label == 'person' }}
+      # 夜間だけ
+      - condition: time
+        after: "22:00:00"
+        before: "05:00:00"
+      # 15分以内に既に送っていれば送らない
+      - condition: state
+        entity_id: timer.ai_uribo_night_cooldown
+        state: "idle"
+    actions:
+      - action: timer.start
+        target:
+          entity_id: timer.ai_uribo_night_cooldown
+      - action: rest_command.ai_uribo_observe
+        data:
+          # 深夜0〜5時の検知は「前の晩」の記録にする（夜勤は日付をまたぐため）
+          date: "{{ (now() - timedelta(hours=5)).strftime('%Y-%m-%d') }}"
+          target: "ALL"
+          item: "夜間の動き"
+          value: >-
+            共用部で動きあり {{ now().strftime('%H:%M') }}（{{ trigger.payload_json.after.camera }}）
+
+  # ---------------------------------------------------------------------------
+  # ② 日中、その日はじめて共用部で人を検出したら記録する（在否確認の材料）
+  # ---------------------------------------------------------------------------
+  - id: ai_uribo_daytime_presence
+    alias: "AI Uribo：日中の在室を記録（1日1回）"
+    mode: single
+    triggers:
+      - trigger: mqtt
+        topic: "frigate/events"
+    conditions:
+      - condition: template
+        value_template: >-
+          {{ trigger.payload_json.type == 'new'
+             and trigger.payload_json.after.label == 'person' }}
+      - condition: time
+        after: "05:00:00"
+        before: "22:00:00"
+      # 12時間以内に既に送っていれば送らない（実質1日1回）
+      - condition: state
+        entity_id: timer.ai_uribo_day_cooldown
+        state: "idle"
+    actions:
+      - action: timer.start
+        target:
+          entity_id: timer.ai_uribo_day_cooldown
+      - action: rest_command.ai_uribo_observe
+        data:
+          date: "{{ now().strftime('%Y-%m-%d') }}"
+          target: "ALL"
+          item: "共用部の動き"
+          value: >-
+            日中に在室を確認 {{ now().strftime('%H:%M') }}（{{ trigger.payload_json.after.camera }}）
+
+  # ---------------------------------------------------------------------------
+  # ③ AI+のシーン検知を受ける枠（例：配膳）
+  #    ※ AI+の検知がHome Assistantに来るかは未確認。
+  #      来ないときはこの自動化を消して、SwitchBotアプリ側のオートメーションから叩く
+  #    有効にするには trigger の entity_id を実機の名前に直して、コメントを外す
+  # ---------------------------------------------------------------------------
+  # - id: ai_uribo_meal_served
+  #   alias: "AI Uribo：配膳を検知したら記録"
+  #   mode: single
+  #   triggers:
+  #     - trigger: state
+  #       entity_id: binary_sensor.＜AI+のシーンに対応するエンティティ＞
+  #       to: "on"
+  #   actions:
+  #     - action: rest_command.ai_uribo_observe
+  #       data:
+  #         date: "{{ now().strftime('%Y-%m-%d') }}"
+  #         target: "ALL"
+  #         item: "食事提供"
+  #         value: "配膳している様子 {{ now().strftime('%H:%M') }}（AIハブ・キッチンカメラ／要精査）"

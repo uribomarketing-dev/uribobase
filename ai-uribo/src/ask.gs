@@ -130,17 +130,33 @@ function buildQuestion_(task, gap, check, remain) {
 function referenceLogText_(gap, check) {
   var name = String(check['参照ログ'] || '').trim();
   if (!name) return '';
-  var row = safely_('referenceLogText_', function () {
-    return findRow(SHEETS.LOG_IMPORT, function (r) {
-      return toDateStr_(r['発生日']) === toDateStr_(gap['対象日'])
-        && String(r['項目名']) === name
-        && String(r['対象']) === String(gap['対象']);
+  var target = String(gap['対象']);
+  var rows = safely_('referenceLogText_', function () {
+    return findRows(SHEETS.LOG_IMPORT, function (r) {
+      if (toDateStr_(r['発生日']) !== toDateStr_(gap['対象日'])) return false;
+      if (String(r['項目名']) !== name) return false;
+      // その人あてのログを優先しつつ、拠点共通（ALL）のログも材料にする。
+      // 共用部のカメラは「誰の」かまでは分からないため、ALLで入ってくる
+      var t = String(r['対象']);
+      return t === target || t === 'ALL';
     });
-  }, null);
-  if (!row) {
+  }, []);
+  if (!rows.length) {
     return '（参考）' + toDateStr_(gap['対象日']) + ' の「' + name + '」の自動記録はありませんでした。';
   }
-  return '（参考）' + name + '：' + String(row['値']);
+
+  // その人あてのログがあれば、そちらだけを使う（ALLは補助）
+  var mine = rows.filter(function (r) { return String(r['対象']) === target; });
+  var use = mine.length ? mine : rows;
+
+  // 夜間の動きのように1晩に何度も入るものは、まとめて時系列で見せる
+  var MAX = 5;
+  var values = use.map(function (r) { return String(r['値']); });
+  var shown = values.slice(0, MAX);
+  var more = values.length - shown.length;
+  var body = (values.length === 1) ? shown[0] : shown.join('／');
+  if (more > 0) body += '　ほか' + more + '件';
+  return '（参考）' + name + '：' + body;
 }
 
 /**
