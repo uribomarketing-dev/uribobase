@@ -208,7 +208,7 @@ function learnFromAnswer_(date, target, itemName, value) {
   var agreed = String(est['推定回答']).trim() === choice;
   var source = String(est['取込元'] || '');
   learnObserve_(source, itemName, agreed);
-  markReviewed_(date, target, itemName, agreed);
+  markReviewed_(date, target, itemName, agreed, source);
   return { 突合: true, 一致: agreed, 情報源: source };
 }
 
@@ -219,15 +219,19 @@ function learnFromAnswer_(date, target, itemName, value) {
  * @param {string} target 対象
  * @param {string} itemName 項目名
  * @param {boolean} agreed 一致したか
+ * @param {string} [sourceId] 突き合わせた自動ソースのid（指定するとその情報源の行だけに書く）
  * @return {void}
  */
-function markReviewed_(date, target, itemName, agreed) {
+function markReviewed_(date, target, itemName, agreed, sourceId) {
   findRows(SHEETS.FILL, function (r) {
     return toDateStr_(r['対象日']) === date
       && String(r['対象']) === String(target)
       && String(r['項目名']) === String(itemName)
       && isTrue_(r['要精査'])
-      && !String(r['精査結果'] || '').trim();
+      && !String(r['精査結果'] || '').trim()
+      // 突き合わせたのはこの情報源の推定だけ。別の情報源の行にまで
+      // 「一致」と書くと、確かめていないものを確かめた扱いにしてしまう
+      && (!sourceId || String(r['情報源'] || '').indexOf(sourceId) >= 0);
   }).forEach(function (r) {
     updateRow(SHEETS.FILL, r._row, { '要精査': false, '精査結果': agreed ? '一致' : '訂正' });
   });

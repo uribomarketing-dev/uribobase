@@ -1984,7 +1984,7 @@ function learnFromAnswer_(date, target, itemName, value) {
   var agreed = String(est['推定回答']).trim() === choice;
   var source = String(est['取込元'] || '');
   learnObserve_(source, itemName, agreed);
-  markReviewed_(date, target, itemName, agreed);
+  markReviewed_(date, target, itemName, agreed, source);
   return { 突合: true, 一致: agreed, 情報源: source };
 }
 
@@ -1995,15 +1995,19 @@ function learnFromAnswer_(date, target, itemName, value) {
  * @param {string} target 対象
  * @param {string} itemName 項目名
  * @param {boolean} agreed 一致したか
+ * @param {string} [sourceId] 突き合わせた自動ソースのid（指定するとその情報源の行だけに書く）
  * @return {void}
  */
-function markReviewed_(date, target, itemName, agreed) {
+function markReviewed_(date, target, itemName, agreed, sourceId) {
   findRows(SHEETS.FILL, function (r) {
     return toDateStr_(r['対象日']) === date
       && String(r['対象']) === String(target)
       && String(r['項目名']) === String(itemName)
       && isTrue_(r['要精査'])
-      && !String(r['精査結果'] || '').trim();
+      && !String(r['精査結果'] || '').trim()
+      // 突き合わせたのはこの情報源の推定だけ。別の情報源の行にまで
+      // 「一致」と書くと、確かめていないものを確かめた扱いにしてしまう
+      && (!sourceId || String(r['情報源'] || '').indexOf(sourceId) >= 0);
   }).forEach(function (r) {
     updateRow(SHEETS.FILL, r._row, { '要精査': false, '精査結果': agreed ? '一致' : '訂正' });
   });
@@ -2680,8 +2684,11 @@ function writeAutoFill_(date, target, fill, sourceId, certainty) {
     '作成日時': nowStr_(),
     '情報源': (fill.推定 ? '自動推定（' : '自動ログ（') + sourceId
       + (level === CERTAINTY.AUTO ? '・学習済み' : '') + '）',
-    '要精査': fill.推定 ? true : false,
-    '精査結果': ''
+    // 「要精査」は人に確かめてほしいものだけに付ける。
+    // 自動確定まで育ったものは質問が出ない＝誰も答えないので、印を付けたままだと
+    // 精査の一覧に永久に残り続けてしまう（実績で確かめ済みなので付けない）
+    '要精査': level === CERTAINTY.ESTIMATED,
+    '精査結果': level === CERTAINTY.AUTO ? '学習済み' : ''
   });
 }
 
@@ -5380,7 +5387,8 @@ function markImported_(body) {
  * 【見方】
  *   対象日数 … その利用者について記録が要る日数（外泊・入院の日は除く）
  *   記録あり … 実際に記録が残っている日数
- *   うち推定 … データからの推定で埋めたまま、まだ人が確かめていない日数
+ *   うち推定 … 機械が入れたまま、その日の中身を人が確かめていない日数
+ *              （情報源の精度が確かめられている「自動確定」もここに含める）
  *   充足率   … 記録あり ÷ 対象日数
  *
  * 充足率が低い項目が、そのまま「監査で突かれるところ」であり、
@@ -5461,7 +5469,9 @@ function buildMonthlyRows_(month, days) {
   }).forEach(function (r) {
     var day = toDateStr_(r['発生日']);
     var key = r['対象'] + '\t' + day + '\t' + r['項目名'];
-    recorded[key] = String(r['確度']) === CERTAINTY.ESTIMATED ? '推定' : '記録';
+    // 「うち推定」は"その日の記録を人が確かめたか"で数える。
+    // 自動確定は情報源としては確かめ済みでも、その日の中身は機械が入れたままなので推定に含める
+    recorded[key] = String(r['確度']) === CERTAINTY.FIXED ? '記録' : '推定';
     // 外泊・入院の日は、その利用者のその日を対象から外す（検出の考え方と合わせる）
     if (String(r['項目名']) === '在否確認' && /外泊|入院|帰省|不在/.test(String(r['値']))) {
       absent[r['対象'] + '\t' + day] = true;

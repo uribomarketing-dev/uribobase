@@ -621,6 +621,15 @@ check('S13学習ログに一致が1件貯まる',
 check('確かめた推定は「精査待ち」の一覧から外れる',
   rows('FILL').some(f => f.対象 === 'TEST03' && f.項目名 === '在否確認' && f.精査結果 === '一致'),
   rows('FILL').filter(f => f.対象 === 'TEST03').map(f => f.項目名 + ':' + f.精査結果));
+// 別の情報源が入れた推定まで「確かめた」ことにしてはいけない
+run(`appendRow(SHEETS.FILL,{fill_id:nextSeqId_(SHEETS.FILL,'fill_id','FIL',6),対象日:'${day1}',
+  対象:'TEST03',項目名:'在否確認',値:'在室（別の機器より）',記入者staff_id:'AUTO:motion_sensor',
+  取込済フラグ:false,作成日時:nowStr_(),gap_id:'',情報源:'自動推定（motion_sensor）',要精査:true,精査結果:''})`);
+run(`learnFromAnswer_('${day1}','TEST03','在否確認','在宅')`);
+check('突き合わせていない情報源の行は確かめた扱いにしない',
+  rows('FILL').some(f => f.対象 === 'TEST03' && String(f.情報源).indexOf('motion_sensor') > 0
+    && isTrueLike(f.要精査) && !String(f.精査結果).trim()),
+  rows('FILL').filter(f => f.対象 === 'TEST03').map(f => f.情報源 + ':' + f.精査結果));
 
 // 実績が規定回数そろうと自動確定に昇格する（＝もう聞かない）
 run(`(function(){for(var i=0;i<7;i++){learnObserve_('door_sensor','在否確認',true);}})()`);
@@ -636,6 +645,11 @@ check('昇格後は在否確認の質問が出なくなる',
   !run(`detectGaps('${day2}',['R02'])`).some(g => g.check_id === 'CHK101' && g.対象 === 'TEST03'));
 check('S7の情報源に「学習済み」と残り、後から説明できる',
   rows('FILL').some(f => f.対象 === 'TEST03' && f.項目名 === '在否確認' && String(f.情報源).indexOf('学習済み') > 0));
+// 自動確定は質問が出ない＝誰も答えないので、要精査のままだと精査の一覧に永久に残ってしまう
+check('自動確定で埋めた分は「精査待ち」に積み上がらない',
+  rows('FILL').filter(f => f.対象 === 'TEST03' && f.項目名 === '在否確認' && f.対象日 === day2)
+    .every(f => !isTrueLike(f.要精査) && String(f.精査結果) === '学習済み'),
+  rows('FILL').filter(f => f.対象 === 'TEST03' && f.対象日 === day2));
 
 // 当たらなくなったら自分で聞き直しに戻る（センサーの位置ずれ・故障に気づくため）
 run(`(function(){for(var i=0;i<4;i++){learnObserve_('door_sensor','在否確認',false);}})()`);
@@ -852,6 +866,19 @@ check('記録があった日数を数える', Number(zaihi.記録あり) === 1, 
 const shokuji = mrows.find(r => r.user_code === 'U001' && r.項目 === '食事提供');
 check('まだ確かめていない推定は「うち推定」で分けて数える',
   Number(shokuji.記録あり) === 1 && Number(shokuji.うち推定) === 1, shokuji);
+// 自動確定は情報源としては確かめ済みでも、その日の中身は機械が入れたまま。
+// これを「人が確かめた記録」に数えると、監査での備えを過大に見せてしまう
+run(`(function(){
+  var m = previousMonth_();
+  appendRow(SHEETS.LOG_IMPORT,{log_id:nextSeqId_(SHEETS.LOG_IMPORT,'log_id','LOG',6),発生日:m+'-02',
+    対象種別:'support',対象:'U001',項目名:'食事提供',値:'朝夕とも提供',取込元:'test',
+    取込日時:nowStr_(),確度:'自動確定',推定回答:'朝夕とも提供'});
+})()`);
+run(`monthlyReport('${monthLabel}')`);
+const shokuji2 = run(`findRows('月次_${monthLabel}')`)
+  .find(r => r.user_code === 'U001' && r.項目 === '食事提供');
+check('学習済みの自動確定も「うち推定」に数える（過大に見せない）',
+  Number(shokuji2.記録あり) === 2 && Number(shokuji2.うち推定) === 2, shokuji2);
 check('未記録の日が分かる（監査で聞かれるのはここ）',
   String(zaihi.未記録日).indexOf('02') >= 0, zaihi.未記録日);
 check('シートに氏名は出さない',

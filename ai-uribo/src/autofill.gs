@@ -351,8 +351,11 @@ function writeAutoFill_(date, target, fill, sourceId, certainty) {
     '作成日時': nowStr_(),
     '情報源': (fill.推定 ? '自動推定（' : '自動ログ（') + sourceId
       + (level === CERTAINTY.AUTO ? '・学習済み' : '') + '）',
-    '要精査': fill.推定 ? true : false,
-    '精査結果': ''
+    // 「要精査」は人に確かめてほしいものだけに付ける。
+    // 自動確定まで育ったものは質問が出ない＝誰も答えないので、印を付けたままだと
+    // 精査の一覧に永久に残り続けてしまう（実績で確かめ済みなので付けない）
+    '要精査': level === CERTAINTY.ESTIMATED,
+    '精査結果': level === CERTAINTY.AUTO ? '学習済み' : ''
   });
 }
 
