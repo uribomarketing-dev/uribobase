@@ -63,6 +63,23 @@ sensor:
       - label
       - start_time
 
+# -----------------------------------------------------------------------------
+# カメラ名の読み替え。
+# FrigateはカメラをMACアドレス（例 B0E9FE038DFB）で持っている。
+# そのまま記録に入れると現場が読めないので、人が分かる名前に直す。
+# カメラを増やしたら、ここに1行足すだけでよい。
+# -----------------------------------------------------------------------------
+template:
+  - sensor:
+      - name: ai_uribo_frigate_camera_label
+        unique_id: ai_uribo_frigate_camera_label
+        state: >-
+          {% set names = {
+               'B0E9FE038DFB': '玉里キッチン'
+             } %}
+          {% set c = state_attr('sensor.ai_uribo_frigate_last_person','camera') %}
+          {{ names.get(c, c if c else '不明') }}
+
 rest_command:
   ai_uribo_observe:
     url: !secret ai_uribo_url
@@ -126,7 +143,7 @@ automation:
           entity_id: timer.ai_uribo_night_cooldown
       - variables:
           ts: "{{ state_attr('sensor.ai_uribo_frigate_last_person','start_time') | float }}"
-          cam: "{{ state_attr('sensor.ai_uribo_frigate_last_person','camera') }}"
+          cam: "{{ states('sensor.ai_uribo_frigate_camera_label') }}"
       - action: rest_command.ai_uribo_observe
         data:
           # 深夜0〜5時の検知は「前の晩」の記録にする（夜勤は日付をまたぐため）
@@ -164,7 +181,7 @@ automation:
           entity_id: timer.ai_uribo_day_cooldown
       - variables:
           ts: "{{ state_attr('sensor.ai_uribo_frigate_last_person','start_time') | float }}"
-          cam: "{{ state_attr('sensor.ai_uribo_frigate_last_person','camera') }}"
+          cam: "{{ states('sensor.ai_uribo_frigate_camera_label') }}"
       - action: rest_command.ai_uribo_observe
         data:
           date: "{{ ts | timestamp_custom('%Y-%m-%d', true) }}"
