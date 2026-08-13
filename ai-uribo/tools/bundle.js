@@ -23,7 +23,7 @@ const OUT = path.join(ROOT, 'dist', 'AI_Uribo_全部入り.gs');
  */
 const ORDER = ['config', 'db', 'log', 'notify', 'secrets', 'setup', 'users', 'learn', 'shift',
   'autofill', 'consistency', 'detect', 'ask', 'correct', 'batch', 'webhook', 'api', 'monthly',
-  'selfcheck', 'effect', 'switchbot', 'backup', 'diagnose', 'selftest'];
+  'selfcheck', 'effect', 'oneclick', 'switchbot', 'backup', 'diagnose', 'selftest'];
 
 /**
  * 全ソースを1つの文字列にまとめる。

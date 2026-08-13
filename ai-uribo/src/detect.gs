@@ -54,7 +54,10 @@ function ruleR01_(targetDate, check) {
   var day = parseInt(Utilities.formatDate(today, TZ, 'd'), 10);
   var from = getSettingNum('shift_request_day', 20);
   var to = getSettingNum('shift_deadline_day', 25);
-  if (day < from || day > to) return [];
+  // リハーサルのときだけ、日付の条件を飛ばす。
+  // これが無いと「設定を20から今日に書き換えて、試して、20に戻す」という
+  // 危なっかしい手作業が要る（戻し忘れると毎日質問が飛ぶ）
+  if (!isRehearsal_() && (day < from || day > to)) return [];
 
   var targetMonth = nextMonthStr_(today);          // 例：2026-09
   var monthKey = targetMonth + '-01';              // 不足の対象日（重複検出防止のキー）

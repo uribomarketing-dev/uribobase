@@ -212,6 +212,12 @@ function mockFolder(name) {
 }
 function iter(arr) { let i = 0; return { hasNext: () => i < arr.length, next: () => arr[i++] }; }
 
+// 試験を回した時刻で結果が変わらないよう、時刻を固定する。
+// これが無いと 22:00〜7:00（深夜帯の送信抑止）に走らせたときだけ
+// 「送信されない」で落ちる＝夜に直そうとした人が原因を見誤る。
+// 時刻を変えて確かめたい試験は、この値を一時的に上書きして最後に10へ戻す。
+sandbox.__fakeHour = 10;
+
 vm.createContext(sandbox);
 // src/ に増えたファイルを読み忘れないよう、並び順だけ決めて残りは自動で全部読む。
 // （GASは全ファイルが1つの空間に読まれるので、ここでも同じ状態を作る）
@@ -1328,6 +1334,77 @@ run(`(function(){
   var s=findRow(SHEETS.STAFF,{'staff_id':'STF002'});updateRow(SHEETS.STAFF,s._row,{'line_user_id':'U_HATT'});
 })()`);
 
+console.log('\n=== T35 手作業をなくす（1クリック機能） ===');
+// 本番セットアップを通してみて、人にしか押せない操作が多く残ることが分かった。
+// とくに「設定値を一時的に書き換えて、試して、戻す」は戻し忘れが事故になる
+
+// ① シフト希望のリハーサル：設定を触らずに、日付の条件だけ飛ばす
+const dayNow = Number(run(`Utilities.formatDate(new Date(), TZ, 'd')`));
+run(`(function(){
+  var r=findRow(SHEETS.SETTING,{'キー':'shift_request_day'});updateRow(SHEETS.SETTING,r._row,{'値':'28'});
+  var d=findRow(SHEETS.SETTING,{'キー':'shift_deadline_day'});updateRow(SHEETS.SETTING,d._row,{'値':'29'});
+  clearSettingCache();
+})()`);
+check('普段は日付の条件どおり、対象外の日には出さない',
+  run(`detectGaps(todayStr_(),['R01'])`).length === 0 || dayNow >= 28);
+const rehearsed = run(`(function(){
+  CacheService.getScriptCache().put(REHEARSAL_KEY,'1',300);
+  var g = detectGaps(todayStr_(),['R01']);
+  CacheService.getScriptCache().remove(REHEARSAL_KEY);
+  return g;
+})()`);
+check('リハーサル中だけ、日付の条件を飛ばして質問を作る', rehearsed.length > 0, rehearsed.length);
+check('リハーサルが終われば元に戻る（設定は触っていない）',
+  run(`getSettingNum('shift_request_day',20)`) === 28
+    && run(`detectGaps(todayStr_(),['R01'])`).length === 0 || dayNow >= 28);
+run(`(function(){
+  var r=findRow(SHEETS.SETTING,{'キー':'shift_request_day'});updateRow(SHEETS.SETTING,r._row,{'値':'20'});
+  var d=findRow(SHEETS.SETTING,{'キー':'shift_deadline_day'});updateRow(SHEETS.SETTING,d._row,{'値':'25'});
+  clearSettingCache();
+})()`);
+
+// ② 本番運用の開始／停止（S8を人が探して書き換えない）
+run('setTestMode(true)');
+check('テストモードON', String(run(`getSetting('test_mode','FALSE')`)) === 'TRUE');
+const liveMsg = String(run('setTestMode(false)'));
+check('本番運用に切り替えられる', String(run(`getSetting('test_mode','FALSE')`)) === 'FALSE');
+check('切り替えた結果を言葉で返す', liveMsg.indexOf('実際にLINEへ届きます') > 0, liveMsg);
+
+// ③ 利用者のまとめ登録（1人ずつ入力させない）
+const usersBefore = rows('USER').length;
+const bulk = String(run(`addUsersBulk(${JSON.stringify('清水\n試験太郎\n試験花子\n玉里\n試験一郎\n')})`));
+check('拠点の見出しを引き継いで、まとめて登録できる',
+  rows('USER').length === usersBefore + 3, rows('USER').length - usersBefore);
+check('拠点が正しく分かれる',
+  rows('USER').slice(-3).filter(u => String(u.拠点) === '清水').length === 2
+    && rows('USER').slice(-3).filter(u => String(u.拠点) === '玉里').length === 1,
+  rows('USER').slice(-3).map(u => u.拠点));
+check('氏名はS9対応表にだけ入る（他のシートには記号だけ）',
+  rows('NAME_MAP').some(n => String(n.氏名) === '試験太郎')
+    && !rows('USER').some(u => JSON.stringify(u).indexOf('試験太郎') >= 0));
+check('1行に「拠点 氏名」と書いても通る',
+  String(run(`addUsersBulk(${JSON.stringify('玉里 試験次郎')})`)).indexOf('登録：1名') === 0);
+check('結果に何名登録できたかを返す', bulk.indexOf('登録：3名') === 0, bulk.substring(0, 40));
+
+// ④ SwitchBotの認証情報（スクリプトプロパティを手で触らせない）
+delete props.SWITCHBOT_TOKEN; delete props.SWITCHBOT_SECRET;
+check('片方だけでは受け付けない',
+  String(run(`setSwitchbotSecrets('tok','')`)).indexOf('両方が必要') > 0);
+run(`setSwitchbotSecrets('  tok123  ','  sec456  ')`);
+check('前後の空白を落として保存する',
+  props.SWITCHBOT_TOKEN === 'tok123' && props.SWITCHBOT_SECRET === 'sec456',
+  [props.SWITCHBOT_TOKEN, props.SWITCHBOT_SECRET]);
+check('値そのものはログに残さない',
+  !rows('RUN_LOG').some(r => JSON.stringify(r).indexOf('tok123') >= 0));
+
+// 後片付け
+run(`deleteRowsWhere_(SHEETS.USER, function(r){ return String(r['user_code']).indexOf('ZZ') === 0; })`);
+run(`(function(){
+  ['試験太郎','試験花子','試験一郎','試験次郎'].forEach(function(n){
+    deleteRowsWhere_(SHEETS.NAME_MAP, function(r){ return String(r['氏名'])===n; });
+  });
+})()`);
+
 console.log('\n=== T34 Webhook秘密キーの作り直し ===');
 // この鍵は画面に一度表示されるので、うっかり人に見せてしまうことがある。
 // そのときに作り直せることと、貼り替え先が分かることが要る
@@ -1620,7 +1697,7 @@ check('送信時刻になったら動く', nb(16).indexOf('送信時刻前') < 0
 check('深夜帯は動かない（送っても保留されるだけ）', nb(23).indexOf('深夜帯') >= 0, nb(23));
 check('メニューからの手動実行は時刻を見ない',
   String(run('nightBatch(true)')).indexOf('深夜帯') < 0, run('nightBatch(true)'));
-sandbox.__fakeHour = null;
+sandbox.__fakeHour = 10;   // 既定（昼）に戻す
 check('明日の予定の検出は1日1回だけ',
   run(`needsPlanDetection_(todayStr_())`) === false
     && run(`needsPlanDetection_(addDays_(todayStr_(),1))`) === true);
