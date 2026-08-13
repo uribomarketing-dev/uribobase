@@ -59,10 +59,13 @@ sensor:
     # 状態そのものに「検出時刻|カメラ名」を入れる。
     # json_attributes_path で配列の先頭を指す書き方は環境によって黙って失敗するため、
     # 属性に頼らず、状態1本で必要な情報を運ぶ（新しい検出が入れば時刻が変わる＝合図になる）
+    # {%- -%} で余白を落とす。落とさないと状態が「\n  1786611974|B0E9FE...\n  」のように
+    # 前後に空白と改行を含み、カメラ名の読み替え（下の template）が一致せず、
+    # 記録にMACアドレスがそのまま出てしまう。エラーにはならないので気づけない
     value_template: >-
-      {% if value_json | count > 0 %}
-      {{ value_json[0].start_time | round(0) }}|{{ value_json[0].camera }}
-      {% else %}none{% endif %}
+      {%- if value_json | count > 0 -%}
+      {{ value_json[0].start_time | int }}|{{ value_json[0].camera }}
+      {%- else -%}none{%- endif -%}
 
 # -----------------------------------------------------------------------------
 # カメラ名の読み替え。
@@ -78,8 +81,8 @@ template:
           {% set names = {
                'B0E9FE038DFB': '玉里キッチン'
              } %}
-          {% set st = states('sensor.ai_uribo_frigate_last_person') %}
-          {% set c = st.split('|')[1] if '|' in st else '' %}
+          {% set st = states('sensor.ai_uribo_frigate_last_person') | trim %}
+          {% set c = st.split('|')[1] | trim if '|' in st else '' %}
           {{ names.get(c, c if c else '不明') }}
 
 rest_command:
@@ -134,7 +137,7 @@ automation:
       # 検出された時刻が夜間か（いまの時刻ではなく、検出の時刻で判断する）
       - condition: template
         value_template: >-
-          {% set h = trigger.to_state.state.split('|')[0]
+          {% set h = (trigger.to_state.state | trim).split('|')[0]
                      | float | timestamp_custom('%H', true) | int %}
           {{ h >= 22 or h < 5 }}
       # 30分以内に既に送っていれば送らない
@@ -146,7 +149,7 @@ automation:
         target:
           entity_id: timer.ai_uribo_night_cooldown
       - variables:
-          ts: "{{ trigger.to_state.state.split('|')[0] | float }}"
+          ts: "{{ (trigger.to_state.state | trim).split('|')[0] | float }}"
           cam: "{{ states('sensor.ai_uribo_frigate_camera_label') }}"
       - action: rest_command.ai_uribo_observe
         data:
@@ -172,7 +175,7 @@ automation:
           {{ '|' in trigger.to_state.state }}
       - condition: template
         value_template: >-
-          {% set h = trigger.to_state.state.split('|')[0]
+          {% set h = (trigger.to_state.state | trim).split('|')[0]
                      | float | timestamp_custom('%H', true) | int %}
           {{ h >= 5 and h < 22 }}
       - condition: state
@@ -183,7 +186,7 @@ automation:
         target:
           entity_id: timer.ai_uribo_day_cooldown
       - variables:
-          ts: "{{ trigger.to_state.state.split('|')[0] | float }}"
+          ts: "{{ (trigger.to_state.state | trim).split('|')[0] | float }}"
           cam: "{{ states('sensor.ai_uribo_frigate_camera_label') }}"
       - action: rest_command.ai_uribo_observe
         data:
@@ -215,7 +218,7 @@ automation:
       # 朝 6:00-8:29 ／ 昼 11:00-13:29 ／ 夕 17:00-19:29
       - condition: template
         value_template: >-
-          {% set h = trigger.to_state.state.split('|')[0]
+          {% set h = (trigger.to_state.state | trim).split('|')[0]
                      | float | timestamp_custom('%H', true) | int %}
           {{ (h >= 6 and h < 9) or (h >= 11 and h < 14) or (h >= 17 and h < 20) }}
       - condition: state
@@ -226,10 +229,10 @@ automation:
         target:
           entity_id: timer.ai_uribo_meal_cooldown
       - variables:
-          ts: "{{ trigger.to_state.state.split('|')[0] | float }}"
+          ts: "{{ (trigger.to_state.state | trim).split('|')[0] | float }}"
           cam: "{{ states('sensor.ai_uribo_frigate_camera_label') }}"
           meal: >-
-            {% set h = trigger.to_state.state.split('|')[0]
+            {% set h = (trigger.to_state.state | trim).split('|')[0]
                        | float | timestamp_custom('%H', true) | int %}
             {{ '朝食' if h < 9 else ('昼食' if h < 14 else '夕食') }}
       - action: rest_command.ai_uribo_observe
