@@ -219,14 +219,22 @@ function quickStart() {
   lines.push('');
   lines.push('【次にやること】');
   var props = PropertiesService.getScriptProperties();
-  if (!props.getProperty(PROP.TOKEN)) lines.push('1. スクリプトプロパティに LINE_CHANNEL_TOKEN を入れる');
-  if (!props.getProperty(PROP.WEBHOOK_KEY)) lines.push('2. スクリプトプロパティに WEBHOOK_SECRET を入れる（未設定だとWebhookは全拒否）');
-  lines.push('3. ウェブアプリとしてデプロイし、URLの末尾に ?k=＜WEBHOOK_SECRET＞ を付けてLINEに登録');
-  lines.push('4. S1の登録コードを本人に伝え、LINEで送ってもらう');
-  lines.push('5. installTriggers() を実行');
-  lines.push('6. メニュー「利用者を登録する」で利用者を登録し、'
-    + '「支援記録の質問を開始する（Phase2）」を実行');
-  lines.push('7. テストが済んだら S8設定の test_mode を FALSE にする（これで本番運用開始）');
+  var n = 0;
+  var next = function (text) { lines.push(String(++n) + '. ' + text); };
+
+  if (!props.getProperty(PROP.TOKEN)) {
+    next('メニュー「AI Uribo」→「① 秘密情報を入力する」でLINEのトークンを貼り付ける'
+      + '（Webhook用の秘密キーは自動で作ります）');
+  }
+  next('デプロイ →「新しいデプロイ」→ ウェブアプリ（実行：自分／アクセス：全員）');
+  next('メニュー「③ ウェブアプリURLを登録する」に、出てきたURLを貼り付ける'
+    + '（LINEに貼るWebhook URLがそのまま出ます）');
+  next('LINE DevelopersのWebhook URLにそれを貼り、「検証」→ Webhookの利用をオン');
+  next('メニュー「トリガーを設定する」を実行');
+  next('メニュー「通し試験を実行（実機確認）」で、ここまでが通っているか確かめる');
+  next('S1の登録コードを本人にだけ伝え、LINEで送ってもらう');
+  next('（支援記録も使う場合）メニュー「利用者を登録する」→「支援記録の質問を開始する（Phase2）」');
+  next('テストが済んだら S8設定の test_mode を FALSE にする（これで本番運用開始）');
   var text = lines.join('\n');
   logInfo(proc, '実行しました');
   return text;
@@ -290,7 +298,9 @@ function checkSetup() {
  */
 function onOpen() {
   SpreadsheetApp.getUi().createMenu('AI Uribo')
-    .addItem('はじめの設定（quickStart）', 'menuQuickStart_')
+    .addItem('① 秘密情報を入力する（LINEトークン）', 'menuSetSecrets_')
+    .addItem('② はじめの設定（quickStart）', 'menuQuickStart_')
+    .addItem('③ ウェブアプリURLを登録する', 'menuSetWebappUrl_')
     .addItem('台帳を初期化する（initSheets）', 'initSheets')
     .addItem('セットアップ点検', 'menuCheckSetup_')
     .addItem('登録コードを発行', 'menuIssueCode_')

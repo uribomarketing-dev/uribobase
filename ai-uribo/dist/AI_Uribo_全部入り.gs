@@ -7,7 +7,7 @@
  * 使い方：GASエディタにスクリプトを1つ作り、このファイルの中身を全文貼り付けるだけ。
  * （appsscript.json だけは別途、プロジェクトの設定から差し替えてください）
  *
- * 収録: 22ファイル
+ * 収録: 23ファイル
  */
 
 // ============================================================================
@@ -1221,6 +1221,151 @@ function truncate_(s, n) {
 }
 
 // ============================================================================
+// secrets.gs
+// ============================================================================
+
+/**
+ * 秘密情報の入力（スクリプトプロパティを画面から設定する）
+ *
+ * 【なぜ要るか】
+ * LINEのトークンなどは「プロジェクトの設定 → スクリプトプロパティ」に、
+ * キー名を一字一句正しく手入力する必要がある。ここは配置作業でいちばん間違えやすく、
+ * 打ち間違えても「動かない」としか分からない（キー名が違うだけで全拒否になる）。
+ *
+ * メニューから貼り付けるだけにして、キー名の打ち間違いを起こしようがなくする。
+ * Webhook用の秘密キーは、そもそも人が考えなくてよいので自動で作る。
+ *
+ * 【秘密情報の扱い】
+ * 値はスクリプトプロパティにだけ保存する。台帳にもログにも書かない。
+ * このファイルの中でも、ログに出すのは「設定した／しなかった」だけにしてある。
+ */
+
+/** 自動生成する秘密キーの長さ @type {number} */
+var GENERATED_SECRET_LENGTH = 24;
+
+/**
+ * 推測されにくい文字列を作る（Webhook用の秘密キーなど）。
+ * @return {string} 秘密キー
+ */
+function makeSecret_() {
+  var chars = 'abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  var s = '';
+  for (var i = 0; i < GENERATED_SECRET_LENGTH; i++) {
+    s += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return s;
+}
+
+/**
+ * 秘密情報をまとめて設定する。
+ *
+ * @param {Object} values {token:..., channelSecret:..., webhookSecret:..., apiSecret:...}
+ *                        空欄のものは変更しない。webhookSecret に '自動' を渡すと自動生成する
+ * @return {{設定:Array.<string>, 変更なし:Array.<string>, webhookSecret:string}} 結果
+ */
+function setSecrets(values) {
+  var proc = 'setSecrets';
+  var props = PropertiesService.getScriptProperties();
+  var v = values || {};
+  var done = [];
+  var skipped = [];
+
+  var put = function (key, value) {
+    var text = String(value || '').trim();
+    if (!text) { skipped.push(key); return; }
+    props.setProperty(key, text);
+    done.push(key);
+  };
+
+  put(PROP.TOKEN, v.token);
+  put(PROP.SECRET, v.channelSecret);
+
+  // Webhookの秘密キーは人が考える必要がないので、無ければ作る
+  var webhook = String(v.webhookSecret || '').trim();
+  if (webhook === '自動' || (!webhook && !props.getProperty(PROP.WEBHOOK_KEY))) {
+    webhook = makeSecret_();
+  }
+  put(PROP.WEBHOOK_KEY, webhook);
+  put('API_SECRET', v.apiSecret);
+
+  // 値そのものは絶対に残さない（何を設定したかだけ）
+  logInfo(proc, '設定: ' + (done.join('・') || 'なし') + ' / 変更なし: ' + (skipped.join('・') || 'なし'));
+  return { 設定: done, 変更なし: skipped, webhookSecret: String(props.getProperty(PROP.WEBHOOK_KEY) || '') };
+}
+
+/**
+ * メニューから秘密情報を入力する。
+ * @return {void}
+ */
+function menuSetSecrets_() {
+  var ui = SpreadsheetApp.getUi();
+  var props = PropertiesService.getScriptProperties();
+
+  var t = ui.prompt('秘密情報の設定（1/2）',
+    'LINEのチャネルアクセストークン（長期）を貼り付けてください。\n'
+    + 'LINE Developers → Messaging API設定 → チャネルアクセストークン\n\n'
+    + '※空欄のままOKを押すと、いまの設定を変えません'
+    + (props.getProperty(PROP.TOKEN) ? '（現在：設定済み）' : '（現在：未設定）'),
+    ui.ButtonSet.OK_CANCEL);
+  if (t.getSelectedButton() !== ui.Button.OK) return;
+
+  var s = ui.prompt('秘密情報の設定（2/2）',
+    'チャネルシークレットを貼り付けてください（任意）。\n'
+    + 'LINE Developers → チャネル基本設定 → チャネルシークレット\n\n'
+    + '※分からなければ空欄のままOKで構いません',
+    ui.ButtonSet.OK_CANCEL);
+  if (s.getSelectedButton() !== ui.Button.OK) return;
+
+  var r = setSecrets({
+    token: String(t.getResponseText()),
+    channelSecret: String(s.getResponseText())
+  });
+
+  var url = props.getProperty('WEBAPP_URL') || '＜ウェブアプリのURL＞';
+  ui.alert('秘密情報を設定しました',
+    '設定：' + (r.設定.join('・') || 'なし') + '\n'
+    + '変更なし：' + (r.変更なし.join('・') || 'なし') + '\n\n'
+    + '【Webhook用の秘密キーは自動で作りました】\n'
+    + r.webhookSecret + '\n\n'
+    + 'LINE DevelopersのWebhook URLには、ウェブアプリのURLの末尾に\n'
+    + '?k=' + r.webhookSecret + '\n'
+    + 'を付けたものを貼ってください。\n'
+    + '例）' + url + '?k=' + r.webhookSecret + '\n\n'
+    + '※この画面を閉じるともう一度は表示されません。'
+    + '必要ならこのままコピーしておいてください（あとで確認する場合は'
+    + 'プロジェクトの設定→スクリプトプロパティ→WEBHOOK_SECRET）。',
+    ui.ButtonSet.OK);
+}
+
+/**
+ * ウェブアプリのURLを控える（SwitchBotのWebhook自動登録と、上の案内文に使う）。
+ * @return {void}
+ */
+function menuSetWebappUrl_() {
+  var ui = SpreadsheetApp.getUi();
+  var res = ui.prompt('ウェブアプリURLの登録',
+    'デプロイで表示されたURL（/exec で終わるもの）を貼り付けてください。\n'
+    + '?k= は付けても付けなくても構いません。',
+    ui.ButtonSet.OK_CANCEL);
+  if (res.getSelectedButton() !== ui.Button.OK) return;
+
+  var url = String(res.getResponseText()).trim().split('?')[0];
+  if (url.indexOf('/exec') < 0) {
+    ui.alert('URLの形が違うようです', '/exec で終わるURLを貼り付けてください。', ui.ButtonSet.OK);
+    return;
+  }
+  var props = PropertiesService.getScriptProperties();
+  var key = props.getProperty(PROP.WEBHOOK_KEY) || '';
+  props.setProperty('WEBAPP_URL', url + (key ? '?k=' + key : ''));
+  logInfo('menuSetWebappUrl_', 'ウェブアプリURLを登録しました（URL自体はログに残しません）');
+  ui.alert('登録しました',
+    'LINE DevelopersのWebhook URLには、次をそのまま貼ってください。\n\n'
+    + url + (key ? '?k=' + key : '') + '\n\n'
+    + '（SwitchBotのWebhook自動登録にも、このURLを使います）',
+    ui.ButtonSet.OK);
+}
+
+// ============================================================================
 // setup.gs
 // ============================================================================
 
@@ -1445,14 +1590,22 @@ function quickStart() {
   lines.push('');
   lines.push('【次にやること】');
   var props = PropertiesService.getScriptProperties();
-  if (!props.getProperty(PROP.TOKEN)) lines.push('1. スクリプトプロパティに LINE_CHANNEL_TOKEN を入れる');
-  if (!props.getProperty(PROP.WEBHOOK_KEY)) lines.push('2. スクリプトプロパティに WEBHOOK_SECRET を入れる（未設定だとWebhookは全拒否）');
-  lines.push('3. ウェブアプリとしてデプロイし、URLの末尾に ?k=＜WEBHOOK_SECRET＞ を付けてLINEに登録');
-  lines.push('4. S1の登録コードを本人に伝え、LINEで送ってもらう');
-  lines.push('5. installTriggers() を実行');
-  lines.push('6. メニュー「利用者を登録する」で利用者を登録し、'
-    + '「支援記録の質問を開始する（Phase2）」を実行');
-  lines.push('7. テストが済んだら S8設定の test_mode を FALSE にする（これで本番運用開始）');
+  var n = 0;
+  var next = function (text) { lines.push(String(++n) + '. ' + text); };
+
+  if (!props.getProperty(PROP.TOKEN)) {
+    next('メニュー「AI Uribo」→「① 秘密情報を入力する」でLINEのトークンを貼り付ける'
+      + '（Webhook用の秘密キーは自動で作ります）');
+  }
+  next('デプロイ →「新しいデプロイ」→ ウェブアプリ（実行：自分／アクセス：全員）');
+  next('メニュー「③ ウェブアプリURLを登録する」に、出てきたURLを貼り付ける'
+    + '（LINEに貼るWebhook URLがそのまま出ます）');
+  next('LINE DevelopersのWebhook URLにそれを貼り、「検証」→ Webhookの利用をオン');
+  next('メニュー「トリガーを設定する」を実行');
+  next('メニュー「通し試験を実行（実機確認）」で、ここまでが通っているか確かめる');
+  next('S1の登録コードを本人にだけ伝え、LINEで送ってもらう');
+  next('（支援記録も使う場合）メニュー「利用者を登録する」→「支援記録の質問を開始する（Phase2）」');
+  next('テストが済んだら S8設定の test_mode を FALSE にする（これで本番運用開始）');
   var text = lines.join('\n');
   logInfo(proc, '実行しました');
   return text;
@@ -1516,7 +1669,9 @@ function checkSetup() {
  */
 function onOpen() {
   SpreadsheetApp.getUi().createMenu('AI Uribo')
-    .addItem('はじめの設定（quickStart）', 'menuQuickStart_')
+    .addItem('① 秘密情報を入力する（LINEトークン）', 'menuSetSecrets_')
+    .addItem('② はじめの設定（quickStart）', 'menuQuickStart_')
+    .addItem('③ ウェブアプリURLを登録する', 'menuSetWebappUrl_')
     .addItem('台帳を初期化する（initSheets）', 'initSheets')
     .addItem('セットアップ点検', 'menuCheckSetup_')
     .addItem('登録コードを発行', 'menuIssueCode_')

@@ -207,7 +207,7 @@ function mockFolder(name) {
 function iter(arr) { let i = 0; return { hasNext: () => i < arr.length, next: () => arr[i++] }; }
 
 vm.createContext(sandbox);
-['config', 'db', 'log', 'notify', 'setup', 'learn', 'autofill', 'detect', 'ask', 'batch', 'webhook', 'backup', 'diagnose', 'switchbot', 'selfcheck', 'users', 'consistency', 'correct', 'api', 'monthly', 'shift', 'selftest'].forEach(f => {
+['config', 'db', 'log', 'notify', 'secrets', 'setup', 'learn', 'autofill', 'detect', 'ask', 'batch', 'webhook', 'backup', 'diagnose', 'switchbot', 'selfcheck', 'users', 'consistency', 'correct', 'api', 'monthly', 'shift', 'selftest'].forEach(f => {
   vm.runInContext(fs.readFileSync(path.join(SRC, f + '.gs'), 'utf8'), sandbox, { filename: f + '.gs' });
 });
 
@@ -1158,6 +1158,29 @@ check('自己点検が処理の遅れに気づいて知らせる',
   JSON.stringify(pushes).indexOf('時間内に終わらず') > 0, JSON.stringify(pushes).substring(0, 300));
 check('実行にかかった秒数が実行ログに残る（遅くなってきたら分かる）',
   String(run('morningBatch()')).indexOf('秒') > 0);
+
+console.log('\n=== T24 秘密情報の入力（打ち間違いを起こしようがなくする） ===');
+delete props.LINE_CHANNEL_TOKEN;
+delete props.WEBHOOK_SECRET;
+const secRes = run(`setSecrets({token:'  dummy-token-123  '})`);
+check('トークンを貼り付けるだけで正しいキー名に入る',
+  props.LINE_CHANNEL_TOKEN === 'dummy-token-123', props.LINE_CHANNEL_TOKEN);
+check('Webhookの秘密キーは自動で作る（人が考えなくてよい）',
+  /^[A-Za-z2-9]{24}$/.test(String(props.WEBHOOK_SECRET || '')), props.WEBHOOK_SECRET);
+check('作った秘密キーを呼び出し元に返す（?k= の案内に使う）',
+  secRes.webhookSecret === props.WEBHOOK_SECRET);
+const before24 = props.WEBHOOK_SECRET;
+run(`setSecrets({channelSecret:'dummy-secret'})`);
+check('空欄の項目は変更しない', props.WEBHOOK_SECRET === before24 && props.LINE_CHANNEL_TOKEN === 'dummy-token-123');
+check('チャネルシークレットも入る', props.LINE_CHANNEL_SECRET === 'dummy-secret');
+run(`setSecrets({webhookSecret:'自動'})`);
+check('「自動」と指定すれば作り直せる', props.WEBHOOK_SECRET !== before24);
+check('秘密の値そのものは実行ログに残さない',
+  !rows('RUN_LOG').some(r => String(r.詳細).indexOf('dummy-token-123') >= 0
+    || String(r.詳細).indexOf(String(props.WEBHOOK_SECRET)) >= 0),
+  rows('RUN_LOG').filter(r => String(r.処理名) === 'setSecrets').map(r => r.詳細));
+// あとのテストのために元に戻す
+run(`(function(){ PropertiesService.getScriptProperties().setProperty('WEBHOOK_SECRET','k123'); })()`);
 
 console.log('\n=== T23 通し試験（実機確認をシステム自身がやる） ===');
 // 実機でしか分からないことを、1回の実行で確かめられるようにしたもの

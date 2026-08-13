@@ -21,7 +21,7 @@ const OUT = path.join(ROOT, 'dist', 'AI_Uribo_全部入り.gs');
  * まとめる順番。config を先頭にしておくと、人が読むときに全体像から入れる。
  * （GASは全ファイルをまとめて読み込むので、動作上は順番に意味はない）
  */
-const ORDER = ['config', 'db', 'log', 'notify', 'setup', 'users', 'learn', 'shift',
+const ORDER = ['config', 'db', 'log', 'notify', 'secrets', 'setup', 'users', 'learn', 'shift',
   'autofill', 'consistency', 'detect', 'ask', 'correct', 'batch', 'webhook', 'api', 'monthly',
   'selfcheck', 'switchbot', 'backup', 'diagnose', 'selftest'];
 
