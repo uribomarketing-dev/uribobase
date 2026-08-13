@@ -1328,6 +1328,66 @@ run(`(function(){
   var s=findRow(SHEETS.STAFF,{'staff_id':'STF002'});updateRow(SHEETS.STAFF,s._row,{'line_user_id':'U_HATT'});
 })()`);
 
+console.log('\n=== T33 拠点が2つになっても、材料が混ざらない ===');
+// 清水にもハブを入れた瞬間に静かに壊れる箇所を、1拠点のうちに塞いでおく。
+// 共用部のカメラは「誰の」かまでは分からないので、拠点あてで入ってくる
+const mixDate = run('addDays_(todayStr_(),-2)');
+run(`(function(){
+  ['MIXA','MIXB'].forEach(function(code,i){
+    var u=findRow(SHEETS.USER,{'user_code':code});
+    var site = i===0 ? 'うりぼベース清水' : 'うりぼベース玉里';
+    if (u) updateRow(SHEETS.USER,u._row,{'拠点':site,'有効':true});
+    else appendRow(SHEETS.USER,{user_code:code,拠点:site,自動ログ対応:true,
+      服薬自動:false,在否自動:false,日中自動:false,有効:true});
+  });
+})()`);
+[['うりぼベース清水','清水の共用部で動きあり 01:10'],
+ ['うりぼベース玉里','玉里の共用部で動きあり 03:20']].forEach(function (p) {
+  postBody({ source: 'frigate', observations: [{ date: mixDate, target: p[0],
+    item: '夜間の動き', value: p[1] }] });
+});
+
+const refFor = (code) => String(run(
+  `referenceLogText_({'対象日':'${mixDate}','対象':'${code}'}, checkById_('CHK102'))`));
+check('清水の質問には清水の動きだけを添える',
+  refFor('MIXA').indexOf('清水の共用部') > 0 && refFor('MIXA').indexOf('玉里の共用部') < 0,
+  refFor('MIXA'));
+check('玉里の質問には玉里の動きだけを添える',
+  refFor('MIXB').indexOf('玉里の共用部') > 0 && refFor('MIXB').indexOf('清水の共用部') < 0,
+  refFor('MIXB'));
+
+// 拠点名の書き方がずれたときは「誰にも届かない」より「多めに届く」（既存の方針に合わせる）
+postBody({ source: 'frigate', observations: [{ date: mixDate, target: 'ALL',
+  item: '夜間の動き', value: '拠点不明の動きあり 05:00' }] });
+check('拠点あてが見つかる人には、全体あては混ぜない（確かな方を優先）',
+  refFor('MIXA').indexOf('拠点不明') < 0, refFor('MIXA'));
+run(`(function(){
+  var u=findRow(SHEETS.USER,{'user_code':'MIXA'});
+  updateRow(SHEETS.USER,u._row,{'拠点':'（表記ゆれ）'});
+})()`);
+check('拠点名がずれていても、全体あてが材料として残る（届かないよりまし）',
+  refFor('MIXA').indexOf('拠点不明') > 0, refFor('MIXA'));
+
+// 本人あてのログがあれば、それがいちばん強い
+postBody({ source: 'door', observations: [{ date: mixDate, target: 'MIXB',
+  item: '夜間の動き', value: '居室の開閉を検知 02:00' }] });
+check('本人あてのログがあれば、それだけを使う（拠点あては補助）',
+  refFor('MIXB').indexOf('居室の開閉') > 0 && refFor('MIXB').indexOf('玉里の共用部') < 0,
+  refFor('MIXB'));
+
+// 後片付け
+run(`(function(){
+  ['MIXA','MIXB'].forEach(function(code){
+    var u=findRow(SHEETS.USER,{'user_code':code});
+    if (u) updateRow(SHEETS.USER,u._row,{'有効':false});
+  });
+  deleteRowsWhere_(SHEETS.LOG_IMPORT, function(r){
+    return toDateStr_(r['発生日'])==='${mixDate}' && String(r['項目名'])==='夜間の動き';
+  });
+})()`);
+check('試験で入れた行を片付ける',
+  rows('LOG_IMPORT').every(r => !(toStr(r.発生日) === mixDate && String(r.項目名) === '夜間の動き')));
+
 console.log('\n=== T32 その材料が本当に効いているかを測る ===');
 // センサーやAIハブは月々の費用がかかる。続けるかどうかを「便利そう」で決めないために、
 // 材料を添えた質問と添えなかった質問で「わからない」率を比べる（現場の操作は増えない）

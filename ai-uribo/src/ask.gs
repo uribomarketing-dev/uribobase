@@ -131,23 +131,32 @@ function referenceLogText_(gap, check) {
   var name = String(check['参照ログ'] || '').trim();
   if (!name) return '';
   var target = String(gap['対象']);
+  // 共用部のカメラは「誰の」かまでは分からないので、拠点あてで入ってくる。
+  // 拠点が2つになったとき、玉里の動きが清水の質問に添えられないよう拠点で絞る
+  var site = safely_('referenceLogText_', function () {
+    var u = findRow(SHEETS.USER, { 'user_code': target });
+    return u ? String(u['拠点'] || '').trim() : '';
+  }, '');
+
   var rows = safely_('referenceLogText_', function () {
     return findRows(SHEETS.LOG_IMPORT, function (r) {
       if (toDateStr_(r['発生日']) !== toDateStr_(gap['対象日'])) return false;
       if (String(r['項目名']) !== name) return false;
-      // その人あてのログを優先しつつ、拠点共通（ALL）のログも材料にする。
-      // 共用部のカメラは「誰の」かまでは分からないため、ALLで入ってくる
       var t = String(r['対象']);
-      return t === target || t === 'ALL';
+      // その人あて → その人の拠点あて → 全体（ALL）の順に材料になる。
+      // ALLを残しているのは、拠点名の書き方がずれたときに「誰にも届かない」より
+      // 「多めに届く」方がまし、という既存の方針に合わせるため
+      return t === target || (site && t === site) || t === 'ALL';
     });
   }, []);
   if (!rows.length) {
     return '（参考）' + toDateStr_(gap['対象日']) + ' の「' + name + '」の自動記録はありませんでした。';
   }
 
-  // その人あてのログがあれば、そちらだけを使う（ALLは補助）
+  // 本人あて > 拠点あて > 全体、の順で、いちばん確かなものだけを使う
   var mine = rows.filter(function (r) { return String(r['対象']) === target; });
-  var use = mine.length ? mine : rows;
+  var ofSite = site ? rows.filter(function (r) { return String(r['対象']) === site; }) : [];
+  var use = mine.length ? mine : (ofSite.length ? ofSite : rows);
 
   // 夜間の動きのように1晩に何度も入るものは、まとめて時系列で見せる
   var MAX = 5;

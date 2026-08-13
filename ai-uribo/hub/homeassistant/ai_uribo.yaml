@@ -151,11 +151,14 @@ automation:
       - variables:
           ts: "{{ (trigger.to_state.state | trim).split('|')[0] | float }}"
           cam: "{{ states('sensor.ai_uribo_frigate_camera_label') }}"
+          # 拠点あてで送る。ALLのままだと、清水にもハブを入れたときに
+          # 玉里の動きが清水の質問に添えられてしまう（拠点をまたいだ誤配）
+          site: "うりぼベース玉里"
       - action: rest_command.ai_uribo_observe
         data:
           # 深夜0〜5時の検知は「前の晩」の記録にする（夜勤は日付をまたぐため）
           date: "{{ (ts - 18000) | timestamp_custom('%Y-%m-%d', true) }}"
-          target: "ALL"
+          target: "{{ site }}"
           item: "夜間の動き"
           value: >-
             共用部で動きあり {{ ts | timestamp_custom('%H:%M', true) }}（{{ cam }}）
@@ -188,10 +191,13 @@ automation:
       - variables:
           ts: "{{ (trigger.to_state.state | trim).split('|')[0] | float }}"
           cam: "{{ states('sensor.ai_uribo_frigate_camera_label') }}"
+          # 拠点あてで送る。ALLのままだと、清水にもハブを入れたときに
+          # 玉里の動きが清水の質問に添えられてしまう（拠点をまたいだ誤配）
+          site: "うりぼベース玉里"
       - action: rest_command.ai_uribo_observe
         data:
           date: "{{ ts | timestamp_custom('%Y-%m-%d', true) }}"
-          target: "ALL"
+          target: "{{ site }}"
           item: "共用部の動き"
           value: >-
             日中に在室を確認 {{ ts | timestamp_custom('%H:%M', true) }}（{{ cam }}）
@@ -231,6 +237,9 @@ automation:
       - variables:
           ts: "{{ (trigger.to_state.state | trim).split('|')[0] | float }}"
           cam: "{{ states('sensor.ai_uribo_frigate_camera_label') }}"
+          # 拠点あてで送る。ALLのままだと、清水にもハブを入れたときに
+          # 玉里の動きが清水の質問に添えられてしまう（拠点をまたいだ誤配）
+          site: "うりぼベース玉里"
           meal: >-
             {% set h = (trigger.to_state.state | trim).split('|')[0]
                        | float | timestamp_custom('%H', true) | int %}
@@ -238,7 +247,7 @@ automation:
       - action: rest_command.ai_uribo_observe
         data:
           date: "{{ ts | timestamp_custom('%Y-%m-%d', true) }}"
-          target: "ALL"
+          target: "{{ site }}"
           item: "食事時間帯の動き"
           value: >-
             {{ meal }}の時間帯に食卓のあたりで動きあり {{ ts | timestamp_custom('%H:%M', true) }}（{{ cam }}）
