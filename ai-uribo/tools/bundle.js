@@ -63,7 +63,31 @@ function buildBundle() {
     ].join('\n');
   }).join('\n');
 
-  return head + '\n' + body;
+  // 貼り付けが途中で切れても気づけるように、収録した関数名の一覧を末尾に埋め込む。
+  // 10,000行のコピーは静かに切れることがあり、切れたまま動くと
+  // 「一部の機能だけ無い」という、いちばん厄介な壊れ方になる
+  const names = [];
+  ORDER.forEach(name => {
+    const code = fs.readFileSync(path.join(SRC, name + '.gs'), 'utf8');
+    const re = /^function\s+([A-Za-z0-9_]+)\s*\(/gm;
+    let m;
+    while ((m = re.exec(code)) !== null) names.push(m[1]);
+  });
+  const footer = [
+    '',
+    '// ' + '='.repeat(76),
+    '// 貼り付け確認用（bundle.js が自動生成。手で編集しないでください）',
+    '// ' + '='.repeat(76),
+    '',
+    '/** この全部入りファイルに入っているはずの関数名 @type {Array.<string>} */',
+    'var BUNDLE_FUNCTIONS = ' + JSON.stringify(names.sort()) + ';',
+    '',
+    '/** 収録ファイル数 @type {number} */',
+    'var BUNDLE_FILE_COUNT = ' + ORDER.length + ';',
+    ''
+  ].join('\n');
+
+  return head + '\n' + body + footer;
 }
 
 /**

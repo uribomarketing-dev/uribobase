@@ -197,13 +197,68 @@ function seedSettings_() {
 }
 
 /**
- * はじめの設定をまとめて実行する（デプロイ直後にこれ1つ実行すればよい）。
- * 台帳を作り、テストモードをONにし、足りない設定を一覧で返す。
- * @return {string} 次にやることの案内
+ * 貼り付けが途中で切れていないかを確かめる。
+ *
+ * 全部入りファイルは1万行ある。ブラウザ経由でコピーすると**静かに切れる**ことがあり、
+ * 切れたまま動くと「一部の機能だけ無い」という、いちばん厄介な壊れ方になる。
+ * （例：夜バッチだけ無い → 数日経ってから「夜の確認が来ない」と気づく）
+ *
+ * bundle.js が末尾に埋め込んだ関数名の一覧と突き合わせて、その場で分かるようにする。
+ * @return {{ok:boolean, missing:Array.<string>, total:number, message:string}} 確認結果
+ */
+function verifyPaste() {
+  // 全部入りファイルの末尾に、収録されているはずの関数名が埋め込んである。
+  // それが1つでも欠けていれば、コピーが途中で切れている
+  if (typeof BUNDLE_FUNCTIONS === 'undefined') {
+    return { ok: true, missing: [], total: 0,
+             message: '（この確認は「全部入りファイル」を貼ったときだけ働きます）' };
+  }
+  // GASでは全関数がグローバルに並ぶので、そこに居るかどうかで確かめられる
+  var g = (typeof globalThis !== 'undefined') ? globalThis : this;
+  var missing = [];
+  for (var i = 0; i < BUNDLE_FUNCTIONS.length; i++) {
+    var name = BUNDLE_FUNCTIONS[i];
+    if (typeof g[name] !== 'function') missing.push(name);
+  }
+  return {
+    ok: (missing.length === 0),
+    missing: missing,
+    total: BUNDLE_FUNCTIONS.length,
+    message: missing.length
+      ? ('貼り付けが途中で切れています。' + BUNDLE_FUNCTIONS.length + '個のうち '
+         + missing.length + '個が見つかりません（例：' + missing.slice(0, 3).join('・') + '）。'
+         + 'エディタの中身をすべて消して、全部入りファイルを最初から貼り直してください。')
+      : (BUNDLE_FUNCTIONS.length + '個の機能がすべて入っています（' + BUNDLE_FILE_COUNT + 'ファイル）。')
+  };
+}
+
+/**
+ * メニューから貼り付けを確認する。
+ * @return {void}
+ */
+function menuVerifyPaste_() {
+  var r = verifyPaste();
+  SpreadsheetApp.getUi().alert(
+    r.ok ? '貼り付けOK' : '貼り付けが不完全です',
+    r.message,
+    SpreadsheetApp.getUi().ButtonSet.OK);
+}
+
+/**
+ * はじめの設定。台帳を作り、初期データを入れ、テストモードで始める。
+ * @return {string} 実行サマリ
  */
 function quickStart() {
   var proc = 'quickStart';
   var lines = ['=== AI Uribo はじめの設定 ==='];
+
+  // 貼り付けが切れたまま進むと、動かない理由が最後まで分からなくなる。ここで止める
+  var paste = safely_(proc, function () { return verifyPaste(); }, { ok: true, message: '' });
+  if (!paste.ok) {
+    logError(proc, paste.message);
+    return '=== 中止しました ===\n' + paste.message;
+  }
+  if (paste.total) lines.push(paste.message);
   lines.push(safely_(proc, function () { return initSheets(); }, '台帳の作成に失敗しました'));
 
   // 設定作業中に現場へ誤送信しないよう、最初はテストモードで始める
@@ -311,6 +366,7 @@ function onOpen() {
     .addItem('シフト表を取り込む', 'menuImportShift_')
     .addItem('今日の夜勤を確認する', 'menuNightShift_')
     .addSeparator()
+    .addItem('貼り付けを確認する', 'menuVerifyPaste_')
     .addItem('診断情報をコピー', 'menuDiagnostics_')
     .addItem('通し試験を実行（実機確認）', 'menuSelfTest_')
     .addSeparator()

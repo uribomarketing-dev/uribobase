@@ -1610,13 +1610,68 @@ function seedSettings_() {
 }
 
 /**
- * はじめの設定をまとめて実行する（デプロイ直後にこれ1つ実行すればよい）。
- * 台帳を作り、テストモードをONにし、足りない設定を一覧で返す。
- * @return {string} 次にやることの案内
+ * 貼り付けが途中で切れていないかを確かめる。
+ *
+ * 全部入りファイルは1万行ある。ブラウザ経由でコピーすると**静かに切れる**ことがあり、
+ * 切れたまま動くと「一部の機能だけ無い」という、いちばん厄介な壊れ方になる。
+ * （例：夜バッチだけ無い → 数日経ってから「夜の確認が来ない」と気づく）
+ *
+ * bundle.js が末尾に埋め込んだ関数名の一覧と突き合わせて、その場で分かるようにする。
+ * @return {{ok:boolean, missing:Array.<string>, total:number, message:string}} 確認結果
+ */
+function verifyPaste() {
+  // 全部入りファイルの末尾に、収録されているはずの関数名が埋め込んである。
+  // それが1つでも欠けていれば、コピーが途中で切れている
+  if (typeof BUNDLE_FUNCTIONS === 'undefined') {
+    return { ok: true, missing: [], total: 0,
+             message: '（この確認は「全部入りファイル」を貼ったときだけ働きます）' };
+  }
+  // GASでは全関数がグローバルに並ぶので、そこに居るかどうかで確かめられる
+  var g = (typeof globalThis !== 'undefined') ? globalThis : this;
+  var missing = [];
+  for (var i = 0; i < BUNDLE_FUNCTIONS.length; i++) {
+    var name = BUNDLE_FUNCTIONS[i];
+    if (typeof g[name] !== 'function') missing.push(name);
+  }
+  return {
+    ok: (missing.length === 0),
+    missing: missing,
+    total: BUNDLE_FUNCTIONS.length,
+    message: missing.length
+      ? ('貼り付けが途中で切れています。' + BUNDLE_FUNCTIONS.length + '個のうち '
+         + missing.length + '個が見つかりません（例：' + missing.slice(0, 3).join('・') + '）。'
+         + 'エディタの中身をすべて消して、全部入りファイルを最初から貼り直してください。')
+      : (BUNDLE_FUNCTIONS.length + '個の機能がすべて入っています（' + BUNDLE_FILE_COUNT + 'ファイル）。')
+  };
+}
+
+/**
+ * メニューから貼り付けを確認する。
+ * @return {void}
+ */
+function menuVerifyPaste_() {
+  var r = verifyPaste();
+  SpreadsheetApp.getUi().alert(
+    r.ok ? '貼り付けOK' : '貼り付けが不完全です',
+    r.message,
+    SpreadsheetApp.getUi().ButtonSet.OK);
+}
+
+/**
+ * はじめの設定。台帳を作り、初期データを入れ、テストモードで始める。
+ * @return {string} 実行サマリ
  */
 function quickStart() {
   var proc = 'quickStart';
   var lines = ['=== AI Uribo はじめの設定 ==='];
+
+  // 貼り付けが切れたまま進むと、動かない理由が最後まで分からなくなる。ここで止める
+  var paste = safely_(proc, function () { return verifyPaste(); }, { ok: true, message: '' });
+  if (!paste.ok) {
+    logError(proc, paste.message);
+    return '=== 中止しました ===\n' + paste.message;
+  }
+  if (paste.total) lines.push(paste.message);
   lines.push(safely_(proc, function () { return initSheets(); }, '台帳の作成に失敗しました'));
 
   // 設定作業中に現場へ誤送信しないよう、最初はテストモードで始める
@@ -1724,6 +1779,7 @@ function onOpen() {
     .addItem('シフト表を取り込む', 'menuImportShift_')
     .addItem('今日の夜勤を確認する', 'menuNightShift_')
     .addSeparator()
+    .addItem('貼り付けを確認する', 'menuVerifyPaste_')
     .addItem('診断情報をコピー', 'menuDiagnostics_')
     .addItem('通し試験を実行（実機確認）', 'menuSelfTest_')
     .addSeparator()
@@ -8059,3 +8115,13 @@ function deleteRowsWhere_(sheetName, predicate) {
 function menuSelfTest_() {
   SpreadsheetApp.getUi().alert('AI Uribo 通し試験', selfTest(), SpreadsheetApp.getUi().ButtonSet.OK);
 }
+
+// ============================================================================
+// 貼り付け確認用（bundle.js が自動生成。手で編集しないでください）
+// ============================================================================
+
+/** この全部入りファイルに入っているはずの関数名 @type {Array.<string>} */
+var BUNDLE_FUNCTIONS = ["activeStaffByLineId_","addDays_","addMissingHeaders_","addUser","answerChoice_","apiFills_","apiPing_","apiUsers_","appendRow","applyCorrection_","archiveOldRows","archiveSheet_","askCorrection_","batchElapsedSec_","book_","buildDate_","buildMonthlyRows_","buildQuestion_","buildReviewText_","buildStatusText_","cancelSiblingTasks_","certaintyOf_","checkApiStep_","checkAskStep_","checkBatchesRan_","checkById_","checkConsistency","checkConsistencyBody_","checkDevices_","checkDriveStep_","checkLearning_","checkLineStep_","checkSecretsStep_","checkSecrets_","checkSetup","checkSheetSize_","checkSheetsStep_","checkSiteNames_","checkSlowBatch_","checkSourcesAlive_","checkStaffLinked_","checkStuckQueue_","checkTestMode_","checkTriggersStep_","checkTriggers_","checkWriteStep_","cleanupSelfTest_","clearSettingCache","countAutoConfirmed_","countAutoFilled_","countNeedsReview_","createAndSendSet","currentHour_","dailyBackup","dailyBackupBody_","dayOfWeek_","daysBetween_","decideStage_","deleteRowsWhere_","describeStatus_","describeWebhook_","detectDayRow_","detectGaps","detectHeader_","disablePhase2","dispatchPendingGaps_","displayName_","doGet","doPost","effectBySourceLines_","effectLines_","effectStats_","enablePhase2","ensureArchiveSheet_","ensureRestoreGuide_","ensureSheet_","escalationStaff_","excerptAround_","excludeAlreadyAsked_","expandChoices_","exportDiagnostics","fillNightStaffFromShift_","fillPlaceholders_","fillSourceOf_","findRow","findRows","findStaleGaps_","finishTurn_","flushQueue","forSiteOf_","formatMd_","getOrCreateFolder_","getSetting","getSettingNum","guessRole_","handleAlertFeedback_","handleAnswer_","handleApiGet_","handleEvent_","handleNote_","hoursBetween_","hoursSince_","importShiftText","includesReask_","ingestObservations_","ingestSwitchbotWebhook_","initSheets","installTriggers","invalidateCache_","isFirstDigestOfMonth_","isMonthEnd_","isNightKind_","isOfficeStaff_","isQuietHours_","isRestKind_","isTrue_","isUserCode_","issueRegistrationCode","jsonOut_","learnFromAnswer_","learnKey_","learnLabel_","learnObserve_","learnRow_","learnSpotCheckDue_","learnStage_","learnSummaryLines_","lineFetch_","lineToken_","listUsers","logError","logInfo","logStart","logWarn","makeRegistrationCode_","makeSecret_","markImported_","markReviewed_","matchStaffByName_","median_","menuAddUser_","menuCheckSetup_","menuDiagnostics_","menuEnablePhase2_","menuImportShift_","menuIssueCode_","menuListUsers_","menuMonthlyReport_","menuNightShift_","menuQuickStart_","menuSelfTest_","menuSetSecrets_","menuSetWebappUrl_","menuVerifyPaste_","monthDays_","monthlyReport","morningBatch","msgButtons_","msgQuickReply_","msgText_","needsPlanDetection_","nextGapId_","nextMonthStr_","nextSeqId_","nextUserCode_","nightBatch","nightBatchNow","nightSendPlan_","nightShiftReport_","nightShiftStaff_","nightStaffNameOf_","notifyContradictions_","nowStr_","offerCorrection_","onFollow_","onOpen","onPostback_","onTextBody_","onText_","padTwo_","parseHour_","parseMappedRow_","parseMatrixRow_","parsePositionalRow_","parseShiftDate_","parseShiftText_","pendingGaps_","previousMonth_","pushRaw_","quickStart","ratePct_","readTable","readTableFromSheet_","recentAnswers_","recordFill_","referenceLogText_","registerGaps","registerGapsBody_","removeDefaultSheet_","reopenRecord_","replyRaw_","resolveAssignees_","resolveShiftSite_","retireUser","rotateBackups_","ruleR01_","ruleR02_","ruleR04_","ruleR05_","runAutoFill","runAutoFillBody_","safely_","saveReport_","saveShift_","saveSummary_","scanAlerts_","seedChecks_","seedSettings_","seedStaff_","selfCheck","selfCheckBody_","selfTest","selfTestBody_","sendMonthlySummary_","sendNextInSet_","sendToEscalationStaff","sendToStaff","setDisplayName_","setSecrets","setSetting_","sheetToCsv_","sheet_","shiftResultText_","siteOfStaffToday_","siteOfTarget_","sourceSilentMessage_","splitCells_","staffById_","staffByLineId_","startBatchClock_","supersedeEstimate_","suspectSide_","switchbotFetch_","switchbotHeaders_","switchbotPoll","switchbotQueryWebhook","switchbotSetupWebhook","switchbotSyncDevices","toDateStr_","toDateTimeStr_","todayStr_","truncate_","tryRegisterByCode_","updateRow","validateSignature_","verifyApiKey_","verifyPaste","verifyRequest_","webhookUrl_","weeklyDigest","withLock_","withinBatchBudget_","writeAutoFill_","writeLog","writeMonthlySheet_"];
+
+/** 収録ファイル数 @type {number} */
+var BUNDLE_FILE_COUNT = 24;

@@ -1961,6 +1961,8 @@ run(`dispatchPendingGaps_(function(g){return String(g['gap_id'])==='GAP-REMIND-1
 check('答えていただいた項目は聞き直さない', pushes.length === 0, pushes.length);
 
 console.log('\n=== T18 GAS貼り付け用の全部入りファイル ===');
+// 1万行のコピーは静かに切れる。切れたまま動くのがいちばん厄介なので、
+// 貼った本人がその場で気づけるかを確かめる
 const bundler = require('../tools/bundle.js');
 check('全部入りファイルが最新（src/を直したら作り直されている）',
   bundler.isBundleFresh(), 'node tools/bundle.js で作り直してください');
@@ -1984,6 +1986,27 @@ check('src/の全ファイルが漏れなく入っている',
   fs.readdirSync(SRC).filter(f => f.endsWith('.gs'))
     .every(f => bundleText.indexOf('// ' + f + '\n') > 0),
   fs.readdirSync(SRC).filter(f => f.endsWith('.gs') && bundleText.indexOf('// ' + f + '\n') < 0));
+
+// --- 貼り付けが途中で切れたときに気づけるか ---
+check('全部入りファイルに、収録した関数名の一覧が入っている',
+  /var BUNDLE_FUNCTIONS = \[/.test(bundleText) && /var BUNDLE_FILE_COUNT = \d+;/.test(bundleText));
+const pasteBox = { console, JSON, Math, String, Number, Object, Array, Date, RegExp, Error, isNaN, parseInt, parseFloat };
+vm.createContext(pasteBox);
+vm.runInContext(bundleText, pasteBox);
+const pasteOk = vm.runInContext('verifyPaste()', pasteBox);
+check('全文が貼れていれば「すべて入っています」と言う', pasteOk.ok === true, pasteOk.message);
+check('何個の機能が入っているかを数字で示す', pasteOk.total > 200, pasteOk.total);
+
+// 関数が1つ欠けても構文エラーにならない＝いちばん見逃しやすい壊れ方
+const brokenText = bundleText.replace(/\nfunction nightBatch\(force\) \{[\s\S]*?\n\}\n/, '\n');
+const brokenBox = { console, JSON, Math, String, Number, Object, Array, Date, RegExp, Error, isNaN, parseInt, parseFloat };
+vm.createContext(brokenBox);
+vm.runInContext(brokenText, brokenBox);
+const brokenRes = vm.runInContext('verifyPaste()', brokenBox);
+check('機能が1つでも欠けていれば、その場で気づける',
+  brokenRes.ok === false && brokenRes.missing.indexOf('nightBatch') >= 0, brokenRes.message);
+check('どう直せばよいかまで書いてある',
+  String(brokenRes.message).indexOf('貼り直して') > 0, brokenRes.message);
 
 run('installTriggers()');
 check('トリガーを登録（SwitchBot設定時は8本）',
