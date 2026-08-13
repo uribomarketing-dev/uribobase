@@ -133,7 +133,11 @@ function nightBatch() {
     var sent = 0;
     recipients.forEach(function (staffId) {
       safely_(proc, function () {
-        var list = excludeAlreadyAsked_(pending, staffId);
+        // その人が入っている拠点の利用者だけに絞る。
+        // 絞らないと、清水の夜勤者に玉里の利用者の質問が届き、
+        // 見ていない利用者について答えられてしまう（記録の担当者もずれる）
+        var list = forSiteOf_(pending, staffId);
+        list = excludeAlreadyAsked_(list, staffId);
         if (!list.length) return;
         var r = createAndSendSet(staffId, list, '【夜の確認セット】利用者さんに聞きながらお答えください');
         if (r.sent) sent += r.count;
@@ -387,6 +391,58 @@ function dispatchPendingGaps_(gapFilter, title, proc) {
       + '（経過' + batchElapsedSec_() + '秒）');
   }
   return sent;
+}
+
+/**
+ * その人が担当する拠点の分だけに絞る。
+ *
+ * 拠点が分からないときは絞らない（届かないより、多めに届く方がまだよい）。
+ * @param {Array.<Object>} gaps S5の行の配列
+ * @param {string} staffId staff_id
+ * @return {Array.<Object>} 絞り込んだ配列
+ */
+function forSiteOf_(gaps, staffId) {
+  var site = siteOfStaffToday_(staffId);
+  if (!site) return gaps;
+
+  // その拠点の利用者コードを集める
+  var mine = {};
+  findRows(SHEETS.USER, function (r) {
+    return isTrue_(r['有効']) && String(r['拠点']).trim() === site;
+  }).forEach(function (u) { mine[String(u['user_code'])] = true; });
+  if (!Object.keys(mine).length) return gaps;
+
+  return gaps.filter(function (g) {
+    var target = String(g['対象']);
+    // 利用者あての質問だけを絞る（拠点あて・スタッフあてはそのまま通す）
+    return mine[target] || !isUserCode_(target);
+  });
+}
+
+/**
+ * その対象が利用者のコードかどうか。
+ * @param {string} target 対象
+ * @return {boolean} 利用者ならtrue
+ */
+function isUserCode_(target) {
+  return !!findRow(SHEETS.USER, { 'user_code': String(target) });
+}
+
+/**
+ * その人が今日入っている拠点を返す（シフト表 → S1の所属の順）。
+ * @param {string} staffId staff_id
+ * @return {string} 拠点（分からなければ空文字）
+ */
+function siteOfStaffToday_(staffId) {
+  var today = todayStr_();
+  var planned = findRow(SHEETS.SHIFT_PLAN, function (r) {
+    return toDateStr_(r['日付']) === today && String(r['staff_id']) === String(staffId)
+      && String(r['拠点'] || '').trim();
+  });
+  if (planned) return String(planned['拠点']).trim();
+
+  var member = staffById_(staffId);
+  return member ? String(member['拠点'] || '').trim() : '';
 }
 
 /**

@@ -1159,6 +1159,71 @@ check('自己点検が処理の遅れに気づいて知らせる',
 check('実行にかかった秒数が実行ログに残る（遅くなってきたら分かる）',
   String(run('morningBatch()')).indexOf('秒') > 0);
 
+console.log('\n=== T28 拠点をまたいだ誤配を防ぐ ===');
+// 2拠点が動き出すと、清水の夜勤者に玉里の利用者の質問が届きうる。
+// 見ていない利用者について答えられると、記録も担当者もずれる
+run(`(function(){
+  // 清水と玉里に1人ずつ利用者、夜勤者も1人ずつ用意する
+  ['SITE_A','SITE_B'].forEach(function(code, i){
+    var site = i === 0 ? '清水' : '玉里';
+    var u = findRow(SHEETS.USER,{'user_code':code});
+    if (u) updateRow(SHEETS.USER,u._row,{'拠点':site,'有効':true});
+    else appendRow(SHEETS.USER,{user_code:code,拠点:site,自動ログ対応:false,服薬自動:false,
+      在否自動:false,日中自動:false,有効:true});
+  });
+  ['STF801','STF802'].forEach(function(id, i){
+    var site = i === 0 ? '清水' : '玉里';
+    if (!staffById_(id)) {
+      appendRow(SHEETS.STAFF,{staff_id:id,氏名:'夜勤'+site,line_user_id:'U_'+id,役割:'夜勤',
+        拠点:site,エスカレーション先フラグ:false,有効:true,登録コード:''});
+    }
+    appendRow(SHEETS.SHIFT_PLAN,{日付:todayStr_(),staff_id:id,拠点:site,勤務区分:'夜勤',
+      開始時刻:'',終了時刻:'',取込元:'test'});
+  });
+  // 両拠点に1件ずつ、夜に聞く不足を作る
+  [['GAP-SITE-A','SITE_A'],['GAP-SITE-B','SITE_B']].forEach(function(p){
+    if (!findRow(SHEETS.GAP,{'gap_id':p[0]})) {
+      appendRow(SHEETS.GAP,{gap_id:p[0],対象日:addDays_(todayStr_(),-1),check_id:'CHK101',対象:p[1],
+        状態:'検出',検出日時:nowStr_(),一次確認先staff_id:'',完了日時:''});
+    }
+  });
+  var c=checkById_('CHK101');updateRow(SHEETS.CHECK,c._row,{'有効':true,'確認先役割':'夜勤'});
+  checkById_._map=null;
+})()`);
+check('清水の夜勤者には清水の利用者だけを渡す',
+  run(`forSiteOf_(pendingGaps_(function(){return true;}),'STF801')`)
+    .every(g => String(g.対象) !== 'SITE_B'),
+  run(`forSiteOf_(pendingGaps_(function(){return true;}),'STF801')`).map(g => g.対象));
+check('玉里の夜勤者には玉里の利用者だけを渡す',
+  run(`forSiteOf_(pendingGaps_(function(){return true;}),'STF802')`)
+    .every(g => String(g.対象) !== 'SITE_A'));
+check('それぞれ自分の拠点の分は受け取る',
+  run(`forSiteOf_(pendingGaps_(function(){return true;}),'STF801')`).some(g => String(g.対象) === 'SITE_A')
+    && run(`forSiteOf_(pendingGaps_(function(){return true;}),'STF802')`).some(g => String(g.対象) === 'SITE_B'));
+check('拠点が分からない人には絞らない（届かないより多めに届く方がまし）',
+  run(`forSiteOf_(pendingGaps_(function(){return true;}),'STF001')`).length
+    >= run(`forSiteOf_(pendingGaps_(function(){return true;}),'STF801')`).length);
+check('その日の拠点はシフト表から見る',
+  run(`siteOfStaffToday_('STF801')`) === '清水' && run(`siteOfStaffToday_('STF802')`) === '玉里');
+
+// 夜バッチを通しても、混ざらないこと
+pushes.length = 0;
+run('nightBatch()');
+const toA = JSON.stringify(pushes.filter(p => p.to === 'U_STF801'));
+const toB = JSON.stringify(pushes.filter(p => p.to === 'U_STF802'));
+check('夜バッチでも、他拠点の利用者の質問は届かない',
+  toA.indexOf('SITE_B') < 0 && toB.indexOf('SITE_A') < 0,
+  (toA + ' || ' + toB).substring(0, 300));
+// 後片付け
+run(`(function(){
+  ['SITE_A','SITE_B'].forEach(function(code){
+    var u=findRow(SHEETS.USER,{'user_code':code}); if (u) updateRow(SHEETS.USER,u._row,{'有効':false});
+  });
+  ['STF801','STF802'].forEach(function(id){
+    var s=staffById_(id); if (s) updateRow(SHEETS.STAFF,s._row,{'有効':false});
+  });
+})()`);
+
 console.log('\n=== T27 給与ソフトのシフトをそのまま貼る ===');
 // 給与計算ソフトの書き出しは形がまちまち。どれで貼られても読めるようにしてある
 const csvShift = [

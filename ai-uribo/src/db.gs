@@ -229,8 +229,10 @@ withLock_._depth = 0;
  */
 function checkById_(checkId) {
   var table = safely_('checkById_', function () { return readTable(SHEETS.CHECK); }, { rows: [] });
-  // キャッシュが作り直された場合・行が増えた場合は索引を作り直す
-  if (checkById_._src !== table || checkById_._len !== table.rows.length) {
+  // キャッシュが作り直された場合・行が増えた場合・索引を消された場合は作り直す
+  // （withLock_ など、外から checkById_._map = null で作り直しを促す箇所があるため、
+  //   索引そのものの有無も必ず見る。見ないと null を引いて落ちる）
+  if (!checkById_._map || checkById_._src !== table || checkById_._len !== table.rows.length) {
     var m = {};
     table.rows.forEach(function (r) { m[String(r['check_id'])] = r; });
     checkById_._map = m;
