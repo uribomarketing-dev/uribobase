@@ -1159,6 +1159,80 @@ check('自己点検が処理の遅れに気づいて知らせる',
 check('実行にかかった秒数が実行ログに残る（遅くなってきたら分かる）',
   String(run('morningBatch()')).indexOf('秒') > 0);
 
+console.log('\n=== T25 SwitchBotから日誌が埋まるまで（通し） ===');
+// 機器の通知が届いてから、既存アプリに渡す記録になるまでを1本で確かめる
+run(`(function(){
+  // 服薬ボックスの開閉センサーを、利用者TEST01に紐付けて有効にする
+  var d = findRow(SHEETS.DEVICE,{'deviceId':'DEV2'});
+  if (!d) {
+    appendRow(SHEETS.DEVICE,{deviceId:'DEV2',deviceName:'清水 服薬ボックス',deviceType:'Contact Sensor',
+      deviceMac:'C0DEB7260F48',拠点:'清水',対象user_code:'TEST01',用途種別:'服薬ボックス',有効:true,備考:''});
+  } else {
+    updateRow(SHEETS.DEVICE,d._row,{'対象user_code':'TEST01','用途種別':'服薬ボックス','有効':true,
+      'deviceMac':'C0DEB7260F48','拠点':'清水'});
+  }
+  var u = findRow(SHEETS.USER,{'user_code':'TEST01'});
+  updateRow(SHEETS.USER,u._row,{'有効':true,'拠点':'清水','服薬自動':true});
+  var c = checkById_('CHK106'); updateRow(SHEETS.CHECK,c._row,{'有効':true}); checkById_._map=null;
+})()`);
+
+// ① SwitchBotから「箱が開いた」が届く
+const medHook = { eventType: 'changeReport', eventVersion: '1', context: {
+  deviceType: 'WoContact', deviceMac: 'C0DEB7260F48', openState: 'open', battery: 92 } };
+const medRes = run(`doPost(${JSON.stringify({ parameter: { k: 'k123' }, postData: { contents: JSON.stringify(medHook) } })})`);
+check('① 機器の通知を受け取る', String(medRes.text) === 'OK:1', medRes);
+const medLog = rows('LOG_IMPORT').filter(l => String(l.取込元).indexOf('switchbot-webhook:DEV2') === 0).slice(-1)[0];
+check('② 誰の・いつの出来事として記録される',
+  medLog && medLog.対象 === 'TEST01' && String(medLog.対象種別) === 'raw_switchbot'
+    && String(medLog.値).indexOf('開閉：open') === 0, medLog);
+check('③ 時刻が残る（声かけの根拠になる）', /\d{1,2}:\d{2}/.test(String(medLog.値)), medLog && medLog.値);
+
+// ④ 日誌側（支援記録）に落ちる
+const medDate = toStr(medLog.発生日);
+run(`runAutoFill('${medDate}')`);
+check('④ 「服薬ボックス開放」が事実として日誌に入る',
+  rows('LOG_IMPORT').some(l => toStr(l.発生日) === medDate && l.対象 === 'TEST01'
+    && l.項目名 === '服薬ボックス開放' && String(l.確度) === '確定'),
+  rows('LOG_IMPORT').filter(l => l.対象 === 'TEST01' && toStr(l.発生日) === medDate).map(l => l.項目名 + ':' + l.確度));
+check('⑤ 「服薬確認」は推定として埋まる（断定しない）',
+  rows('LOG_IMPORT').some(l => toStr(l.発生日) === medDate && l.対象 === 'TEST01'
+    && l.項目名 === '服薬確認' && String(l.確度) === '推定'));
+check('⑥ 既存アプリに渡す補完台帳に、出所つきで載る',
+  rows('FILL').some(f => toStr(f.対象日) === medDate && f.対象 === 'TEST01' && f.項目名 === '服薬確認'
+    && String(f.情報源).indexOf('switchbot_medication') > 0 && isTrueLike(f.要精査)),
+  rows('FILL').filter(f => f.対象 === 'TEST01' && toStr(f.対象日) === medDate).map(f => f.項目名 + ':' + f.情報源));
+check('⑦ それでも夜勤者には「声かけしたか」を聞く（機械には決められない）',
+  run(`detectGaps('${medDate}',['R02'])`).some(g => g.check_id === 'CHK106' && g.対象 === 'TEST01'),
+  run(`detectGaps('${medDate}',['R02'])`));
+const medGapNow = run(`(function(){
+  var gaps = detectGaps('${medDate}',['R02']).filter(function(g){return g.check_id==='CHK106';});
+  registerGaps(gaps);
+  var g = findRows(SHEETS.GAP,function(r){
+    return r['check_id']==='CHK106' && toDateStr_(r['対象日'])==='${medDate}' && r['対象']==='TEST01';})[0];
+  var msgs = buildQuestion_({task_id:'T-PREVIEW'}, g, checkById_('CHK106'), 0);
+  return JSON.stringify(msgs);
+})()`);
+check('⑧ その質問に、箱が開いた時刻が添えられる（判断の材料になる）',
+  String(medGapNow).indexOf('服薬ボックス開放') > 0 && /\d{1,2}:\d{2}/.test(String(medGapNow)),
+  String(medGapNow).substring(0, 300));
+
+// 未登録の機器・用途未設定の機器は取り込まない（誤って別の人の記録にしない）
+const strayHook = { eventType: 'changeReport', context: { deviceMac: 'AAAAAAAAAAAA', openState: 'open' } };
+check('⑨ 台帳に無い機器からの通知は記録しない',
+  String(run(`doPost(${JSON.stringify({ parameter: { k: 'k123' }, postData: { contents: JSON.stringify(strayHook) } })})`).text) === 'OK:0');
+
+// 深夜の出来事は「前の晩」の記録として扱う（日付で切ると夜勤の記録が抜けて見える）
+const nightHook = { eventType: 'changeReport', context: {
+  deviceType: 'WoContact', deviceMac: 'C0DEB7260F48', openState: 'open' } };
+const nowHour = Number(run(`Utilities.formatDate(new Date(), TZ, 'H')`));
+run(`doPost(${JSON.stringify({ parameter: { k: 'k123' }, postData: { contents: JSON.stringify(nightHook) } })})`);
+const lastLog = rows('LOG_IMPORT').filter(l => String(l.取込元).indexOf('switchbot-webhook:DEV2') === 0).slice(-1)[0];
+check('⑩ 深夜0〜5時の検知は前の晩の記録にする',
+  nowHour < 5
+    ? toStr(lastLog.発生日) === run('addDays_(todayStr_(),-1)')
+    : toStr(lastLog.発生日) === run('todayStr_()'),
+  '現在' + nowHour + '時 / 記録日 ' + toStr(lastLog.発生日));
+
 console.log('\n=== T24 秘密情報の入力（打ち間違いを起こしようがなくする） ===');
 delete props.LINE_CHANNEL_TOKEN;
 delete props.WEBHOOK_SECRET;

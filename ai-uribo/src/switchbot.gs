@@ -305,13 +305,19 @@ function ingestSwitchbotWebhook_(body) {
     var itemName = role.項目名;
     if ((role.種別 === 'raw_door' || role.種別 === 'raw_motion') && isNight) itemName = '夜間' + itemName;
 
+    // 深夜0〜5時の出来事は「前の晩」の記録として扱う。
+    // 日付で切ってしまうと、夜勤者が入っていた晩の出来事が翌日の記録に付き、
+    // 「その晩どうだったか」を見たときに抜けて見える（夜勤の記録がいちばん問われるところ）
+    var eventDate = (hour < 5) ? addDays_(todayStr_(), -1) : todayStr_();
+
     appendRow(SHEETS.LOG_IMPORT, {
       'log_id': nextSeqId_(SHEETS.LOG_IMPORT, 'log_id', 'LOG', 6),
-      '発生日': todayStr_(),
+      '発生日': eventDate,
       '対象種別': role.種別,
       '対象': String(dev['対象user_code'] || dev['拠点'] || 'ALL'),
       '項目名': itemName,
-      '値': describeWebhook_(ctx) + '（' + Utilities.formatDate(new Date(), TZ, 'HH:mm') + '）',
+      '値': describeWebhook_(ctx) + '（' + Utilities.formatDate(new Date(), TZ, 'HH:mm')
+        + (hour < 5 ? '・翌' + Utilities.formatDate(new Date(), TZ, 'M/d') + '未明' : '') + '）',
       '取込元': 'switchbot-webhook:' + String(dev['deviceId']),
       '取込日時': nowStr_()
     });
