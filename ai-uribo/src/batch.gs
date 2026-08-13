@@ -2,7 +2,8 @@
  * 定時バッチ（06 Step4 を【08】v1.1に読み替えた確定仕様）
  *
  *   morningBatch()  毎朝10:00  自動充足 → 不足検出 → まとめ確認LINE（Stage1は藤原様・服部様の2名）
- *   nightBatch()    毎晩21:00  夜勤向け「夜の確認セット」（昨日の穴＋明日の予定を本人に確認）
+ *   nightBatch()    1時間ごと  夜勤向け「夜の確認セット」を、その人の勤務開始1時間前に送る
+ *                              （勤務開始時刻が分からない人は従来どおり21:00）
  *   weeklyDigest()  日曜10:00  週次ダイジェスト（未完了・わからない残件＋精度指標）
  *   flushQueue()    毎朝7:00   深夜帯に保留した送信を流す（notify.gsに実装）
  *
@@ -93,27 +94,108 @@ function morningBatch() {
 }
 
 /**
+ * 夜の確認セットを「誰に・何時に」送るかを決める。
+ *
+ * 21時固定だと、17時入りの人には遅すぎ（もう業務が始まっている）、
+ * 22時入りの人には早すぎる（まだ家にいる）。
+ * S11に勤務開始時刻が入っていれば、その night_lead_hours 時間前に送る。
+ * 入っていなければ、これまでどおり night_batch_hour に送る。
+ *
+ * @param {string} today 対象日（YYYY-MM-DD）
+ * @return {Array.<{staffId: string, hour: number, basis: string}>} 送信計画
+ */
+function nightSendPlan_(today) {
+  var lead = getSettingNum('night_lead_hours', 1);
+  var fallback = getSettingNum('night_batch_hour', 21);
+  var earliest = getSettingNum('night_earliest_hour', 12);
+  var latest = getSettingNum('quiet_start_hour', 22) - 1;  // 深夜帯に入ると保留されるので手前で送る
+
+  // その日の夜勤行から、開始時刻をstaff_idごとに拾う（複数行あれば早い方）
+  var starts = {};
+  safely_('nightSendPlan_', function () {
+    findRows(SHEETS.SHIFT_PLAN, function (r) {
+      return toDateStr_(r['日付']) === today && isNightKind_(r['勤務区分']);
+    }).forEach(function (r) {
+      var h = parseHour_(r['開始時刻']);
+      if (h < 0) return;
+      var id = String(r['staff_id']);
+      if (starts[id] === undefined || h < starts[id]) starts[id] = h;
+    });
+  });
+
+  return nightShiftStaff_().map(function (staffId) {
+    var start = starts[staffId];
+    if (start === undefined) {
+      return { staffId: staffId, hour: fallback, basis: '勤務開始時刻が未登録のため' + fallback + '時' };
+    }
+    var h = start - lead;
+    if (h > latest) h = latest;
+    if (h < earliest) {
+      return { staffId: staffId, hour: fallback, basis: '勤務開始' + start + '時（早すぎるため' + fallback + '時）' };
+    }
+    return { staffId: staffId, hour: h, basis: '勤務開始' + start + '時の' + lead + '時間前' };
+  });
+}
+
+/**
+ * 明日の予定（R04）の検出は1日1回でよいので、その日にもう走ったかを覚えておく。
+ * @param {string} today 対象日
+ * @return {boolean} まだ走っていなければtrue
+ */
+function needsPlanDetection_(today) {
+  var p = PropertiesService.getScriptProperties();
+  if (p.getProperty('NIGHT_PLAN_DATE') === today) return false;
+  p.setProperty('NIGHT_PLAN_DATE', today);
+  return true;
+}
+
+/**
  * 夜バッチ（夜の確認セット）。
  * 昨日の穴のうち本人に聞けば分かるものと、明日の予定をまとめて夜勤担当に送る。
+ *
+ * 1時間ごとに動き、その時刻に送る人が居るときだけ動く。
+ * 送る時刻は nightSendPlan_ が決める（勤務開始の1時間前／不明なら21時）。
+ *
+ * @param {boolean} [force] trueなら時刻を見ずに今すぐ送る（メニューからの手動実行）
  * @return {string} 実行サマリ
  */
-function nightBatch() {
+function nightBatch(force) {
   var proc = 'nightBatch';
+  var now = force === true;
   return withLock_(proc, BATCH_LOCK_WAIT_MS, function () {
    try {
-    logStart(proc);
-    startBatchClock_();
-    var tomorrow = addDays_(todayStr_(), 1);
+    var today = todayStr_();
+    var hour = currentHour_();
 
-    // 明日の予定（R04）を検出して登録
-    var planGaps = safely_(proc, function () { return detectGaps(tomorrow, ['R04']); }, []);
-    safely_(proc, function () { registerGaps(planGaps); });
+    // 深夜帯は送っても保留されるだけなので、手動実行以外は何もしない
+    if (!now && isQuietHours_()) return '深夜帯のためスキップ';
 
-    var recipients = nightShiftStaff_();
-    if (!recipients.length) {
+    var plan = nightSendPlan_(today);
+    if (!plan.length) {
       logWarn(proc, '夜勤担当が特定できないため送信しない');
       return '夜勤担当なし';
     }
+    // 送信時刻を過ぎた人だけに送る。過ぎた分をずっと対象に残すのは、
+    // トリガーが1回飛んでも翌時間に追いつけるようにするため
+    // （同じ質問を二度送らないのは excludeAlreadyAsked_ が防ぐ）
+    var due = now ? plan : plan.filter(function (p) { return hour >= p.hour; });
+    if (!due.length) {
+      return '送信時刻前（' + plan.map(function (p) { return p.hour + '時'; }).join('/') + '）';
+    }
+
+    logStart(proc);
+    startBatchClock_();
+    var tomorrow = addDays_(today, 1);
+
+    // 明日の予定（R04）を検出して登録（1日1回でよい）
+    var planGaps = [];
+    if (now || needsPlanDetection_(today)) {
+      planGaps = safely_(proc, function () { return detectGaps(tomorrow, ['R04']); }, []);
+      safely_(proc, function () { registerGaps(planGaps); });
+    }
+
+    var recipients = due.map(function (p) { return p.staffId; });
+    due.forEach(function (p) { logInfo(proc, '送信対象 ' + p.staffId + '：' + p.basis); });
 
     // 送る対象：明日の予定と、支援記録のうち利用者本人・夜勤に聞けば分かる項目
     // （シフト希望はスタッフ本人に朝送るものなので、夜の確認セットには入れない）
@@ -152,6 +234,14 @@ function nightBatch() {
     return 'エラー: ' + e;
    }
   }, function () { return '他の処理が実行中のためスキップ'; });
+}
+
+/**
+ * 夜の確認セットを、時刻を待たずに今すぐ送る（メニュー用）。
+ * @return {string} 実行サマリ
+ */
+function nightBatchNow() {
+  return nightBatch(true);
 }
 
 /**
@@ -507,7 +597,9 @@ function installTriggers() {
   var quietEnd = getSettingNum('quiet_end_hour', 7);
 
   ScriptApp.newTrigger('morningBatch').timeBased().atHour(morning).everyDays(1).inTimezone(TZ).create();
-  ScriptApp.newTrigger('nightBatch').timeBased().atHour(night).everyDays(1).inTimezone(TZ).create();
+  // 夜の確認セットは人によって送る時刻が違う（勤務開始の1時間前）ので、
+  // 1時間ごとに起きて「いま送る人が居るか」だけ見る。居なければ何もしないで終わる
+  ScriptApp.newTrigger('nightBatch').timeBased().everyHours(1).create();
   ScriptApp.newTrigger('dailyBackup').timeBased().atHour(backup).everyDays(1).inTimezone(TZ).create();
   ScriptApp.newTrigger('flushQueue').timeBased().atHour(quietEnd).everyDays(1).inTimezone(TZ).create();
   // 自己点検は朝バッチより前。ここでトリガーの欠けや連携の停止に自分で気づく
@@ -525,8 +617,9 @@ function installTriggers() {
     .onWeekDay(dayOfWeek_(getSettingNum('weekly_digest_dow', 0)))
     .atHour(digestHour).inTimezone(TZ).create();
 
-  var summary = '自己点検' + getSettingNum('selfcheck_hour', 8) + '時 / 朝' + morning + '時 / 夜' + night
-    + '時 / 週次(日)' + digestHour + '時 / 月次(1日)' + getSettingNum('monthly_report_hour', 11) + '時'
+  var summary = '自己点検' + getSettingNum('selfcheck_hour', 8) + '時 / 朝' + morning
+    + '時 / 夜は勤務開始' + getSettingNum('night_lead_hours', 1) + '時間前（不明なら' + night
+    + '時）/ 週次(日)' + digestHour + '時 / 月次(1日)' + getSettingNum('monthly_report_hour', 11) + '時'
     + ' / バックアップ' + backup + '時 / キュー送信' + quietEnd + '時';
   logInfo(proc, summary);
   return summary;

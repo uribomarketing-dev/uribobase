@@ -101,6 +101,11 @@ const pushes = [];   // LINE push
 const replies = [];  // LINE reply
 
 function formatDate(date, tz, fmt) {
+  // 「いま何時か」で動きが変わる処理（夜の確認セットの送信時刻など）を、
+  // 試験を回した時刻に左右されずに確かめるための差し替え口
+  if (fmt === 'H' && sandbox.__fakeHour !== undefined && sandbox.__fakeHour !== null) {
+    return String(sandbox.__fakeHour);
+  }
   const d = new Date(date.getTime() + TZ_OFFSET_MS);
   const p = n => String(n).padStart(2, '0');
   return fmt
@@ -158,7 +163,8 @@ const sandbox = {
     },
     newTrigger: (fn) => {
       const b = {
-        timeBased: () => b, atHour: () => b, everyDays: () => b, onWeekDay: () => b, onMonthDay: () => b,
+        timeBased: () => b, atHour: () => b, everyDays: () => b, everyHours: () => b,
+        onWeekDay: () => b, onMonthDay: () => b,
         inTimezone: () => b, create: () => { sandbox.__triggers.push(fn); }
       };
       return b;
@@ -388,7 +394,7 @@ check('服薬確認の質問に開放ログが判断材料として添えられ�
 check('参照ログが無い項目には余計な情報を付けない',
   run(`buildQuestion_({task_id:'TSKX'}, findRow(SHEETS.GAP,{'gap_id':'${medGap.gap_id}'}), checkById_('CHK101'), 0)`).length === 1);
 pushes.length = 0;
-console.log('  nightBatch → ' + run('nightBatch()'));
+console.log('  nightBatch → ' + run('nightBatch(true)'));
 check('夜勤不在時は社員へ送信', pushes.length >= 1, pushes.length);
 check('夜の確認セットの見出し', JSON.stringify(pushes[0]).indexOf('夜の確認セット') > 0);
 check('夜はシフト希望を混ぜない', JSON.stringify(pushes).indexOf('シフト希望') < 0);
@@ -1208,7 +1214,7 @@ check('その日の拠点はシフト表から見る',
 
 // 夜バッチを通しても、混ざらないこと
 pushes.length = 0;
-run('nightBatch()');
+run('nightBatch(true)');
 const toA = JSON.stringify(pushes.filter(p => p.to === 'U_STF801'));
 const toB = JSON.stringify(pushes.filter(p => p.to === 'U_STF802'));
 check('夜バッチでも、他拠点の利用者の質問は届かない',
@@ -1313,6 +1319,60 @@ check('シフトの人がLINE未登録なら、そう分かるようにする',
 run(`(function(){
   var s=findRow(SHEETS.STAFF,{'staff_id':'STF002'});updateRow(SHEETS.STAFF,s._row,{'line_user_id':'U_HATT'});
 })()`);
+
+console.log('\n=== T29 勤務開始の1時間前に送る ===');
+// 21時固定だと、17時入りの人には遅すぎ（もう業務中）、22時入りの人には早すぎる。
+// シフト表の開始時刻に合わせて、その人が動き出す前に届くようにする
+check('時刻の書き方のゆれを読める（17:00／17時／1700／17）',
+  run(`parseHour_('17:00')`) === 17 && run(`parseHour_('17時30分')`) === 17
+    && run(`parseHour_('1700')`) === 17 && run(`parseHour_('17')`) === 17
+    && run(`parseHour_('9:30')`) === 9,
+  [run(`parseHour_('17:00')`), run(`parseHour_('17時30分')`), run(`parseHour_('1700')`), run(`parseHour_('17')`)]);
+check('読めない値は「分からない」にする（勝手に0時にしない）',
+  run(`parseHour_('')`) === -1 && run(`parseHour_('未定')`) === -1 && run(`parseHour_('25:00')`) === -1);
+
+// シフト表に開始時刻を入れる
+const setStart = (h) => run(`(function(){
+  findRows(SHEETS.SHIFT_PLAN,function(r){
+    return toDateStr_(r['日付'])===todayStr_() && String(r['staff_id'])==='STF002';
+  }).forEach(function(r){updateRow(SHEETS.SHIFT_PLAN,r._row,{'勤務区分':'夜勤','開始時刻':${JSON.stringify(h)}});});
+})()`);
+const planFor = (id) => run(`nightSendPlan_(todayStr_())`).find(p => p.staffId === id);
+
+setStart('17:00');
+check('勤務開始17時なら16時に送る（1時間前）', (planFor('STF002') || {}).hour === 16, planFor('STF002'));
+check('なぜその時刻なのかを言える', String((planFor('STF002') || {}).basis).indexOf('勤務開始17時の1時間前') >= 0,
+  (planFor('STF002') || {}).basis);
+
+setStart('');
+check('開始時刻が無ければ従来どおり21時', (planFor('STF002') || {}).hour === 21, planFor('STF002'));
+check('開始時刻が無いことを隠さない', String((planFor('STF002') || {}).basis).indexOf('未登録') >= 0);
+
+setStart('23:00');
+check('深夜入りの人でも、送信抑止に入る前（21時）に届ける', (planFor('STF002') || {}).hour === 21, planFor('STF002'));
+
+setStart('7:00');
+check('朝からの勤務が夜勤扱いで入っていても、早朝には送らない', (planFor('STF002') || {}).hour === 21, planFor('STF002'));
+
+// 実際に送る／送らないの判断
+setStart('17:00');
+const nb = (h) => { sandbox.__fakeHour = h; const r = run('nightBatch()'); return String(r); };
+check('送信時刻より前は何もしない', nb(14).indexOf('送信時刻前') === 0, nb(14));
+check('何時に送るつもりかをログに残す', nb(14).indexOf('16時') > 0, nb(14));
+check('送信時刻になったら動く', nb(16).indexOf('送信時刻前') < 0, nb(16));
+check('深夜帯は動かない（送っても保留されるだけ）', nb(23).indexOf('深夜帯') >= 0, nb(23));
+check('メニューからの手動実行は時刻を見ない',
+  String(run('nightBatch(true)')).indexOf('深夜帯') < 0, run('nightBatch(true)'));
+sandbox.__fakeHour = null;
+check('明日の予定の検出は1日1回だけ',
+  run(`needsPlanDetection_(todayStr_())`) === false
+    && run(`needsPlanDetection_(addDays_(todayStr_(),1))`) === true);
+check('今日の夜勤の画面に、送信時刻が出る',
+  String(run('nightShiftReport_()')).indexOf('夜の確認セットの送信時刻') > 0,
+  String(run('nightShiftReport_()')).substring(0, 400));
+check('毎時のトリガーが登録されている（時刻が人によって違うため）',
+  run('installTriggers()').indexOf('勤務開始') > 0 && sandbox.__triggers.indexOf('nightBatch') >= 0,
+  run('installTriggers()'));
 
 console.log('\n=== T25 SwitchBotから日誌が埋まるまで（通し） ===');
 // 機器の通知が届いてから、既存アプリに渡す記録になるまでを1本で確かめる

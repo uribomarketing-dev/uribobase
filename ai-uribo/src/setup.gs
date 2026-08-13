@@ -315,7 +315,7 @@ function onOpen() {
     .addItem('通し試験を実行（実機確認）', 'menuSelfTest_')
     .addSeparator()
     .addItem('朝バッチを今すぐ実行', 'morningBatch')
-    .addItem('夜の確認セットを今すぐ実行', 'nightBatch')
+    .addItem('夜の確認セットを今すぐ実行', 'nightBatchNow')
     .addItem('週次ダイジェストを今すぐ実行', 'weeklyDigest')
     .addItem('月次まとめを作る（監査用）', 'menuMonthlyReport_')
     .addItem('バックアップを今すぐ実行', 'dailyBackup')

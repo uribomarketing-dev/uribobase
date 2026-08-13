@@ -536,6 +536,19 @@ function nightShiftReport_(targetDate) {
     }).join('／'));
   }
 
+  // 夜の確認セットが何時に飛ぶか（勤務開始の1時間前／不明なら21時）
+  if (date === todayStr_()) {
+    var plan = safely_('nightShiftReport_', function () { return nightSendPlan_(date); }, []);
+    if (plan.length) {
+      lines.push('');
+      lines.push('夜の確認セットの送信時刻：');
+      plan.forEach(function (p) {
+        var m = staffById_(p.staffId);
+        lines.push('　' + (m ? String(m['氏名']) : p.staffId) + '　' + p.hour + '時ごろ（' + p.basis + '）');
+      });
+    }
+  }
+
   if (fallback.length) {
     lines.push('');
     lines.push('分からない拠点の夜の確認セットは、社員（'

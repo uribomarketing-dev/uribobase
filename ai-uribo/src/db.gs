@@ -321,6 +321,37 @@ function toDateTimeStr_(d) {
 }
 
 /**
+ * 「17:00」「17時」「17」「1700」「9:30」やシートの時刻セル（Date）から「時」を取り出す。
+ * 給与ソフトの書き出し方が事業所ごとに違うため、よくある書き方をひととおり受ける。
+ * 読み取れなければ -1 を返す（呼び出し側で既定値に落とす）。
+ * @param {Date|string|number} v 時刻の値
+ * @return {number} 0〜23、読み取れなければ-1
+ */
+function parseHour_(v) {
+  if (v === null || v === undefined || v === '') return -1;
+  if (Object.prototype.toString.call(v) === '[object Date]') {
+    return parseInt(Utilities.formatDate(v, TZ, 'H'), 10);
+  }
+  var s = String(v).trim();
+  if (!s) return -1;
+  var m = s.match(/^(\d{1,2})\s*[:：時]\s*(\d{0,2})/);
+  if (!m) m = s.match(/^(\d{1,2})(\d{2})$/);           // 1700
+  if (!m) m = s.match(/^(\d{1,2})$/);                  // 17
+  if (!m) return -1;
+  var h = Number(m[1]);
+  return (h >= 0 && h <= 23) ? h : -1;
+}
+
+/**
+ * いまが何時か（0〜23）。
+ * @param {Date} [now] 判定する日時（省略時は現在）
+ * @return {number} 時
+ */
+function currentHour_(now) {
+  return parseInt(Utilities.formatDate(now || new Date(), TZ, 'H'), 10);
+}
+
+/**
  * 現在日時（文字列）。
  * @return {string} YYYY-MM-DD HH:mm
  */

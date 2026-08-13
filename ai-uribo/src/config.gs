@@ -123,7 +123,9 @@ var SHEET_DEFS = [
  */
 var DEFAULT_SETTINGS = [
   ['morning_batch_hour', '10', '朝バッチの実行時刻（前日分の穴を確認）'],
-  ['night_batch_hour', '21', '夜の確認セットの送信時刻（夜勤向け）'],
+  ['night_batch_hour', '21', '夜の確認セットの送信時刻（勤務開始時刻が分からないときの既定）'],
+  ['night_lead_hours', '1', '夜の確認セットを勤務開始の何時間前に送るか'],
+  ['night_earliest_hour', '12', '夜の確認セットをこの時刻より前には送らない'],
   ['weekly_digest_dow', '0', '週次ダイジェストの曜日（0=日曜）'],
   ['weekly_digest_hour', '10', '週次ダイジェストの送信時刻'],
   ['backup_hour', '3', 'バックアップの実行時刻'],
