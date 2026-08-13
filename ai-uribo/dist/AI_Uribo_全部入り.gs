@@ -345,7 +345,7 @@ var UNKNOWN_ANSWERS = ['わからない', '未定'];
  * （「診断」「精度」などが台帳の一言欄に紛れ込むのを防ぐ）
  * @type {Array.<string>}
  */
-var COMMAND_WORDS = ['状況', 'ヘルプ', 'まとめ', 'シフト', '訂正', '精査', '精度', 'せいど',
+var COMMAND_WORDS = ['状況', '夜勤', 'ヘルプ', 'まとめ', 'シフト', '訂正', '精査', '精度', 'せいど',
                      '診断', '報告', 'テスト実行'];
 
 // ============================================================================
@@ -1680,6 +1680,7 @@ function onOpen() {
     .addItem('登録済みの利用者を見る', 'menuListUsers_')
     .addItem('支援記録の質問を開始する（Phase2）', 'menuEnablePhase2_')
     .addItem('シフト表を取り込む', 'menuImportShift_')
+    .addItem('今日の夜勤を確認する', 'menuNightShift_')
     .addSeparator()
     .addItem('診断情報をコピー', 'menuDiagnostics_')
     .addItem('通し試験を実行（実機確認）', 'menuSelfTest_')
@@ -2481,6 +2482,94 @@ function shiftResultText_(r) {
     lines.push('この期間は、夜勤担当者の質問が出なくなります（記録には担当者名が残ります）。');
   }
   return lines.join('\n');
+}
+
+/**
+ * 「今日は誰が夜勤か」を、根拠つきで人が読める形にする。
+ *
+ * 夜の確認セットは夜勤の人に届く。だから**誰が夜勤だと思われているか**が見えないと、
+ * 「送ったのに現場に届いていない」が静かに起きる。
+ * どこから分かったのか（シフト表／役割／社員に代替）まで一緒に出す。
+ *
+ * @param {string} [targetDate] 対象日 YYYY-MM-DD（省略時は今日）
+ * @return {string} 表示用の文章
+ */
+function nightShiftReport_(targetDate) {
+  var date = toDateStr_(targetDate || todayStr_());
+  var lines = ['【' + formatMd_(date) + 'の夜勤】'];
+
+  var sites = {};
+  findRows(SHEETS.USER, function (r) { return isTrue_(r['有効']); })
+    .forEach(function (u) { if (u['拠点']) sites[String(u['拠点'])] = true; });
+  var siteNames = Object.keys(sites);
+  if (!siteNames.length) {
+    lines.push('利用者がまだ登録されていないため、拠点が分かりません。');
+    lines.push('メニュー「利用者を登録する」から登録してください。');
+    return lines.join('\n');
+  }
+
+  var fallback = [];
+  siteNames.forEach(function (site) {
+    // 1. シフト表（いちばん確か）
+    var planned = findRows(SHEETS.SHIFT_PLAN, function (r) {
+      return toDateStr_(r['日付']) === date
+        && String(r['勤務区分']).indexOf('夜勤') >= 0
+        && String(r['拠点']) === site;
+    }).map(function (r) { return staffById_(String(r['staff_id'])); })
+      .filter(function (m) { return m; });
+
+    if (planned.length) {
+      lines.push('・' + site + '：' + planned.map(function (m) {
+        return String(m['氏名']) + (String(m['line_user_id'] || '').trim() ? '' : '（LINE未登録★）');
+      }).join('・') + '　←シフト表より');
+      return;
+    }
+
+    // 2. 役割が夜勤の人
+    var byRole = findRows(SHEETS.STAFF, function (r) {
+      return isTrue_(r['有効']) && String(r['役割']).indexOf('夜勤') >= 0
+        && String(r['拠点']) === site;
+    });
+    if (byRole.length) {
+      lines.push('・' + site + '：' + byRole.map(function (m) {
+        return String(m['氏名']) + (String(m['line_user_id'] || '').trim() ? '' : '（LINE未登録★）');
+      }).join('・') + '　←S1の役割より（シフト表が無いため）');
+      return;
+    }
+
+    fallback.push(site);
+    lines.push('・' + site + '：**分かりません**　←シフト表にも、役割=夜勤の登録にもありません');
+  });
+
+  // 記録として残っている夜勤担当者（監査で問われるのはこちら）
+  var recorded = findRows(SHEETS.LOG_IMPORT, function (r) {
+    return toDateStr_(r['発生日']) === date && String(r['項目名']) === '夜勤担当者';
+  });
+  if (recorded.length) {
+    lines.push('');
+    lines.push('記録上の担当者：' + recorded.map(function (r) {
+      return String(r['対象']) + '＝' + String(r['値']);
+    }).join('／'));
+  }
+
+  if (fallback.length) {
+    lines.push('');
+    lines.push('分からない拠点の夜の確認セットは、社員（'
+      + escalationStaff_().map(function (s) { return String(s['氏名']); }).join('・')
+      + '）にお送りします。');
+    lines.push('直すには次のどちらかを行ってください。');
+    lines.push('　A) メニュー「シフト表を取り込む」でその月の夜勤を貼り付ける（おすすめ）');
+    lines.push('　B) S1_スタッフマスタに夜勤の方を追加し、役割を「夜勤」、拠点をその拠点にする');
+  }
+  return lines.join('\n');
+}
+
+/**
+ * メニューから今日の夜勤を確認する。
+ * @return {void}
+ */
+function menuNightShift_() {
+  SpreadsheetApp.getUi().alert('今日の夜勤', nightShiftReport_(), SpreadsheetApp.getUi().ButtonSet.OK);
 }
 
 // ============================================================================
@@ -5103,6 +5192,9 @@ function onTextBody_(staff, userId, text, replyToken, proc) {
         replyRaw_(replyToken, [msgText_('SwitchBotの「AIまとめ」の本文を、そのまま貼り付けて送ってください。\n'
           + '先頭に日付（例：8/11）を書くとその日の記録になります。書かなければ昨日として扱います。')]);
         return;
+      case '夜勤':
+        replyRaw_(replyToken, [msgText_(nightShiftReport_())]);
+        return;
       case '訂正':
         offerCorrection_(staff, replyToken);
         return;
@@ -5177,6 +5269,7 @@ var HELP_TEXT_ = 'AI Uriboの使い方\n'
   + '・届いた質問はボタンを押すだけでOKです\n'
   + '・「未実施だった」「わからない」を選んだときだけ、一言だけ理由を送ってください（不要なら「なし」）\n'
   + '・「状況」…今の未完了件数を確認できます\n'
+  + '・「夜勤」…今日の夜勤が誰か（どこから分かったか）を返します\n'
   + '・「訂正」…押し間違えたときに、直近の回答を選んで直せます（前の回答も履歴に残ります）\n'
   + '・「報告」…事故・体調急変などをその場で報告できます\n'
   + '・「ヘルプ」…このメッセージ\n'

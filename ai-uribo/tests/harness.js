@@ -1159,6 +1159,48 @@ check('自己点検が処理の遅れに気づいて知らせる',
 check('実行にかかった秒数が実行ログに残る（遅くなってきたら分かる）',
   String(run('morningBatch()')).indexOf('秒') > 0);
 
+console.log('\n=== T26 今日は誰が夜勤か ===');
+// 夜の確認セットは夜勤の人に届く。誰が夜勤だと思われているかが見えないと、
+// 「送ったのに現場に届いていない」が静かに起きる
+run(`(function(){
+  findRows(SHEETS.SHIFT_PLAN,function(r){return toDateStr_(r['日付'])===todayStr_();})
+    .forEach(function(r){updateRow(SHEETS.SHIFT_PLAN,r._row,{'勤務区分':'（テストで消去）'});});
+  var u=findRow(SHEETS.USER,{'user_code':'TEST01'});updateRow(SHEETS.USER,u._row,{'有効':true,'拠点':'清水'});
+  findRows(SHEETS.STAFF,function(r){return String(r['役割']).indexOf('夜勤')>=0;})
+    .forEach(function(r){updateRow(SHEETS.STAFF,r._row,{'有効':false});});
+})()`);
+const ns1 = run('nightShiftReport_()');
+check('分からないときは「分かりません」と言う（黙って社員に送らない）',
+  String(ns1).indexOf('分かりません') > 0 && String(ns1).indexOf('社員') > 0, String(ns1).substring(0, 300));
+check('直し方を2つ示す（シフト表／役割の登録）',
+  String(ns1).indexOf('シフト表を取り込む') > 0 && String(ns1).indexOf('役割を「夜勤」') > 0);
+
+// シフト表が入っていれば、そこから答える
+run(`importShiftText('${run('todayStr_()')} 清水 夜勤 服部俊喜')`);
+const ns2 = run('nightShiftReport_()');
+check('シフト表があれば、そこから誰かを答える',
+  String(ns2).indexOf('清水：服部俊喜') > 0 && String(ns2).indexOf('シフト表より') > 0, String(ns2).substring(0, 300));
+
+// LINEからも聞ける（この検証のために、無効化した夜勤スタッフを戻す）
+run(`(function(){
+  var s=findRow(SHEETS.STAFF,{'staff_id':'STF900'});
+  if (s) updateRow(SHEETS.STAFF,s._row,{'有効':true});
+})()`);
+replies.length = 0;
+post([{ type: 'message', webhookEventId: 'en1', source: { userId: 'U_NIGHT' }, message: { type: 'text', text: '夜勤' }, replyToken: 'rn1' }]);
+check('LINEで「夜勤」と送れば誰でも確認できる',
+  JSON.stringify(replies[0] || '').indexOf('の夜勤') > 0, replies[0]);
+
+// LINE未登録の人がシフトに入っていたら、印を付けて知らせる
+run(`(function(){
+  var s=findRow(SHEETS.STAFF,{'staff_id':'STF002'});updateRow(SHEETS.STAFF,s._row,{'line_user_id':''});
+})()`);
+check('シフトの人がLINE未登録なら、そう分かるようにする',
+  String(run('nightShiftReport_()')).indexOf('LINE未登録★') > 0, run('nightShiftReport_()').substring(0, 200));
+run(`(function(){
+  var s=findRow(SHEETS.STAFF,{'staff_id':'STF002'});updateRow(SHEETS.STAFF,s._row,{'line_user_id':'U_HATT'});
+})()`);
+
 console.log('\n=== T25 SwitchBotから日誌が埋まるまで（通し） ===');
 // 機器の通知が届いてから、既存アプリに渡す記録になるまでを1本で確かめる
 run(`(function(){

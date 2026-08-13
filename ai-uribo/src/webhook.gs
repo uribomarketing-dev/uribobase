@@ -448,6 +448,9 @@ function onTextBody_(staff, userId, text, replyToken, proc) {
         replyRaw_(replyToken, [msgText_('SwitchBotの「AIまとめ」の本文を、そのまま貼り付けて送ってください。\n'
           + '先頭に日付（例：8/11）を書くとその日の記録になります。書かなければ昨日として扱います。')]);
         return;
+      case '夜勤':
+        replyRaw_(replyToken, [msgText_(nightShiftReport_())]);
+        return;
       case '訂正':
         offerCorrection_(staff, replyToken);
         return;
@@ -522,6 +525,7 @@ var HELP_TEXT_ = 'AI Uriboの使い方\n'
   + '・届いた質問はボタンを押すだけでOKです\n'
   + '・「未実施だった」「わからない」を選んだときだけ、一言だけ理由を送ってください（不要なら「なし」）\n'
   + '・「状況」…今の未完了件数を確認できます\n'
+  + '・「夜勤」…今日の夜勤が誰か（どこから分かったか）を返します\n'
   + '・「訂正」…押し間違えたときに、直近の回答を選んで直せます（前の回答も履歴に残ります）\n'
   + '・「報告」…事故・体調急変などをその場で報告できます\n'
   + '・「ヘルプ」…このメッセージ\n'
