@@ -318,6 +318,14 @@ function weeklyDigest() {
     if (saved) lines.push('学習済みのため聞かずに済んだ件数：' + saved + '件');
     lines.push('');
     safely_(proc, function () { learnSummaryLines_().forEach(function (l) { lines.push(l); }); });
+    // 月に一度、センサー・カメラが実際に効いているかを数字で示す。
+    // 費用のかかるものを続けるか止めるかを、感覚ではなく実績で決められるようにする
+    if (isFirstDigestOfMonth_(to)) {
+      lines.push('');
+      safely_(proc, function () {
+        effectLines_().concat(effectBySourceLines_()).forEach(function (l) { lines.push(l); });
+      });
+    }
     lines.push('');
     if (open.length) {
       lines.push('▼未完了の一覧（最大15件）');

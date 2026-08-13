@@ -480,6 +480,14 @@ function onTextBody_(staff, userId, text, replyToken, proc) {
         }
         replyRaw_(replyToken, [msgText_(learnSummaryLines_().join('\n'))]);
         return;
+      case '効果':
+        if (!isOfficeStaff_(staff)) {
+          replyRaw_(replyToken, [msgText_('このコマンドは社員のみ実行できます。')]);
+          return;
+        }
+        replyRaw_(replyToken, [msgText_(
+          effectLines_().concat(effectBySourceLines_()).join('\n'))]);
+        return;
       case '診断':
         if (!isOfficeStaff_(staff)) {
           replyRaw_(replyToken, [msgText_('このコマンドは社員のみ実行できます。')]);

@@ -213,7 +213,13 @@ function mockFolder(name) {
 function iter(arr) { let i = 0; return { hasNext: () => i < arr.length, next: () => arr[i++] }; }
 
 vm.createContext(sandbox);
-['config', 'db', 'log', 'notify', 'secrets', 'setup', 'learn', 'autofill', 'detect', 'ask', 'batch', 'webhook', 'backup', 'diagnose', 'switchbot', 'selfcheck', 'users', 'consistency', 'correct', 'api', 'monthly', 'shift', 'selftest'].forEach(f => {
+// src/ に増えたファイルを読み忘れないよう、並び順だけ決めて残りは自動で全部読む。
+// （GASは全ファイルが1つの空間に読まれるので、ここでも同じ状態を作る）
+const FIRST = ['config', 'db', 'log', 'notify'];
+const SRC_FILES = FIRST.concat(
+  fs.readdirSync(SRC).filter(f => f.endsWith('.gs')).map(f => f.replace(/\.gs$/, ''))
+    .filter(f => FIRST.indexOf(f) < 0).sort());
+SRC_FILES.forEach(f => {
   vm.runInContext(fs.readFileSync(path.join(SRC, f + '.gs'), 'utf8'), sandbox, { filename: f + '.gs' });
 });
 
@@ -1321,6 +1327,56 @@ check('シフトの人がLINE未登録なら、そう分かるようにする',
 run(`(function(){
   var s=findRow(SHEETS.STAFF,{'staff_id':'STF002'});updateRow(SHEETS.STAFF,s._row,{'line_user_id':'U_HATT'});
 })()`);
+
+console.log('\n=== T32 その材料が本当に効いているかを測る ===');
+// センサーやAIハブは月々の費用がかかる。続けるかどうかを「便利そう」で決めないために、
+// 材料を添えた質問と添えなかった質問で「わからない」率を比べる（現場の操作は増えない）
+const putTask = (withRef, unknown, i) => run(`(function(){
+  appendRow(SHEETS.TASK, {task_id:'ZZE${i}', gap_id:'', 送信先staff_id:'STF001',
+    送信日時: todayStr_() + ' 10:00',
+    回答: ${JSON.stringify(unknown ? 'わからない' : '済')},
+    回答日時: todayStr_() + ' 10:05', 回答方法:'ボタン',
+    送信本文: ${JSON.stringify(withRef ? '（参考）夜間の動き：共用部で動きあり 02:40\n巡回はいかがでしたか' : '巡回はいかがでしたか')},
+    送信状態:'送信済', 再送回数:0, 追記待ち:false, セットid:'', 並び順:0, retry_key:'', 作成日時: nowStr_()});
+})()`);
+
+// まだ件数が少ないうちは「判断できません」と正直に言う
+putTask(true, false, 0); putTask(false, true, 1);
+check('件数が少ないうちは判定しない（数字で誤解させない）',
+  run('effectLines_()').join('\n').indexOf('まだ判断できません') > 0, run('effectLines_()'));
+
+// 材料あり20件（わからない1件）／材料なし20件（わからない8件）
+for (let i = 0; i < 20; i++) putTask(true, i < 1, 100 + i);
+for (let i = 0; i < 20; i++) putTask(false, i < 8, 200 + i);
+const eff = run('effectLines_()').join('\n');
+check('材料ありと材料なしの「わからない」率を並べて出す',
+  eff.indexOf('自動データを添えた質問') > 0 && eff.indexOf('添えなかった質問') > 0, eff);
+check('効いていれば「役に立っています」と言い切る',
+  eff.indexOf('役に立っています') > 0, eff);
+check('何ポイント差かを数字で出す', /\d+(\.\d)?ポイント/.test(eff), eff);
+
+// 逆に差が無ければ「止めても影響が小さい」と言う（費用の判断ができるように）
+run(`deleteRowsWhere_(SHEETS.TASK, function(r){ return String(r['task_id']).indexOf('ZZE') === 0; })`);
+for (let i = 0; i < 20; i++) putTask(true, i < 4, 300 + i);
+for (let i = 0; i < 20; i++) putTask(false, i < 4, 400 + i);
+const eff2 = run('effectLines_()').join('\n');
+check('差が無ければ、止めてよいとはっきり言う',
+  eff2.indexOf('差はほとんどありません') > 0 && eff2.indexOf('止めても影響が小さい') > 0, eff2);
+
+// どの材料が何件に添えられたか
+const bySrc = run('effectBySourceLines_()').join('\n');
+check('どの材料を何件の質問に添えたかが分かる',
+  bySrc.indexOf('夜間の動き') > 0, bySrc);
+
+// 月に一度だけ週次に載せる（毎週載せると読まれなくなる）
+check('効き目は月の最初の週次にだけ載せる',
+  run(`isFirstDigestOfMonth_('2026-09-06')`) === true
+    && run(`isFirstDigestOfMonth_('2026-09-20')`) === false);
+
+// 後片付け
+run(`deleteRowsWhere_(SHEETS.TASK, function(r){ return String(r['task_id']).indexOf('ZZE') === 0; })`);
+check('試験で入れた行を片付ける',
+  rows('TASK').every(r => String(r.task_id).indexOf('ZZE') !== 0));
 
 console.log('\n=== T31 自動データが黙って止まったら気づく ===');
 // いちばん怖い壊れ方はエラーではなく「沈黙」。SDが埋まる・電源が抜ける・Wi-Fiが変わる。
