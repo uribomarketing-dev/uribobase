@@ -223,6 +223,85 @@ function menuAddUsersBulk_() {
 }
 
 // ---------------------------------------------------------------------------
+// 薬箱の通知が届いているかを、その場で確かめる
+// ---------------------------------------------------------------------------
+
+/**
+ * SwitchBotの「開いた」通知が届くかを試した結果を作る。
+ *
+ * 【なぜ要るか】
+ * 薬箱が開いたかどうかは、この通知でしか分からない（1時間おきに状態を見ても、
+ * その間に開けて閉めた薬箱は「閉じている」としか映らない）。
+ * ところが通知は、届かなくてもどこにもエラーが出ない。登録は「正常」と出たまま、
+ * 質問だけが材料なしで届き続ける。
+ *
+ * 推測で語らずに済むよう、薬箱を1回開けてもらって白黒つける。
+ * 「届いた／届いていない／届いたが機器が未登録」を区別できるようにしてある。
+ *
+ * @param {string} since この時刻以降を見る（yyyy-MM-dd HH:mm）
+ * @return {string} 結果の説明
+ */
+function checkWebhookTest_(since) {
+  var arrived = findRows(SHEETS.LOG_IMPORT, function (r) {
+    return String(r['取込元']).indexOf('switchbot-webhook:') === 0
+      && String(r['取込日時']) >= since;
+  });
+  if (arrived.length) {
+    return '届きました（' + arrived.length + '件）。\n\n'
+      + '薬箱の開閉をそのまま記録の材料に使えます。'
+      + '服薬の質問は、開けた形跡があれば「（参考）」付きで届きます。';
+  }
+
+  // 届いてはいるが弾かれている場合と、そもそも届いていない場合を分ける
+  var logs = findRows(SHEETS.RUN_LOG, function (r) {
+    return String(r['日時']) >= since;
+  });
+  var unknownDevice = logs.filter(function (r) {
+    return String(r['詳細']).indexOf('未登録の機器からの通知') >= 0;
+  });
+  if (unknownDevice.length) {
+    return '通知は届いていますが、どの機器か分かりませんでした。\n\n'
+      + 'S12_機器マスタにその機器が無いか、有効=FALSE のままです。\n'
+      + 'メニュー「SwitchBot機器を読み込む」を押すと一覧に出ます。';
+  }
+  var rejected = logs.filter(function (r) {
+    return String(r['詳細']).indexOf('不正なリクエスト') >= 0;
+  });
+  if (rejected.length) {
+    return '通知は届いていますが、秘密キーが合わずに弾いています。\n\n'
+      + 'メニュー「SwitchBotのWebhookを登録」を押して登録し直してください'
+      + '（いまのURLで登録し直します）。';
+  }
+
+  return '届きませんでした。\n\n'
+    + 'SwitchBot側からこのURLに通知が来ていません。考えられるのは次の2つです。\n'
+    + '① SwitchBotがGoogleの転送（リダイレクト）を追いかけていない\n'
+    + '② Webhookの登録先が別のURLになっている\n\n'
+    + 'まずメニュー「SwitchBotのWebhookを確認」で②を見てください。\n'
+    + '一致しているのに届かない場合は①です。そのときは薬箱の開閉を材料にできないので、'
+    + '服薬は今までどおり質問でお答えいただく形になります（記録は残ります）。';
+}
+
+/**
+ * メニューから、薬箱の通知が届くかを試す。
+ * @return {void}
+ */
+function menuTestSwitchbotWebhook_() {
+  var ui = SpreadsheetApp.getUi();
+  var since = nowStr_();
+  var res = ui.alert('薬箱の通知が届くか試す',
+    '薬箱の開け閉めがAI Uriboに届いているかを、その場で確かめます。\n\n'
+    + '① この画面を出したまま、薬箱（または開閉センサー）を1回開けて閉める\n'
+    + '② 10秒ほど待ってから「OK」を押す\n\n'
+    + '※S4に開閉の記録が1件入りますが、そのままで構いません。',
+    ui.ButtonSet.OK_CANCEL);
+  if (res !== ui.Button.OK) return;
+  var result = checkWebhookTest_(since);
+  logInfo('menuTestSwitchbotWebhook_', result.split('\n')[0]);
+  ui.alert('結果', result, ui.ButtonSet.OK);
+}
+
+// ---------------------------------------------------------------------------
 // SwitchBotのトークン入力（スクリプトプロパティを手で触らせない）
 // ---------------------------------------------------------------------------
 

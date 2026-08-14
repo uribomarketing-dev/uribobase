@@ -391,6 +391,7 @@ function onOpen() {
     .addItem('SwitchBotの状態を今すぐ取得', 'switchbotPoll')
     .addItem('SwitchBotのWebhookを登録', 'switchbotSetupWebhook')
     .addItem('SwitchBotのWebhookを確認', 'menuQueryWebhook_')
+    .addItem('薬箱の通知が届くか試す', 'menuTestSwitchbotWebhook_')
     .addSeparator()
     .addItem('トリガーを設定する（installTriggers）', 'installTriggers')
     .addToUi();

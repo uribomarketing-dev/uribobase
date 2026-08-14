@@ -2179,10 +2179,37 @@ run(`(function(){
 check('届いていれば知らせない',
   run(`(function(){ var a=[]; checkWebhookArriving_(a); return a; })()`).length === 0);
 
+// 届くかどうかを、その場で白黒つけられる（推測で語らずに済ませるため）
+// 実機では数分の間があくが、テストは1分以内に走りきるので、
+// 前のテストが残した同じ分の警告を先に片付けておく
+run(`(function(){
+  deleteRowsWhere_(SHEETS.LOG_IMPORT, function(r){
+    return String(r['取込元']).indexOf('switchbot-webhook:') === 0;
+  });
+  deleteRowsWhere_(SHEETS.RUN_LOG, function(r){
+    var d = String(r['詳細']);
+    return d.indexOf('未登録の機器からの通知') >= 0 || d.indexOf('不正なリクエスト') >= 0;
+  });
+})()`);
+const hookSince = run('nowStr_()');
+check('届いていなければ「届きませんでした」と言う',
+  String(run(`checkWebhookTest_(${JSON.stringify(hookSince)})`)).indexOf('届きませんでした') === 0,
+  run(`checkWebhookTest_(${JSON.stringify(hookSince)})`).substring(0, 60));
+check('届かないときに考えられる原因と、次の一手を出す',
+  String(run(`checkWebhookTest_(${JSON.stringify(hookSince)})`)).indexOf('SwitchBotのWebhookを確認') > 0);
+run(`appendRow(SHEETS.RUN_LOG,{日時:nowStr_(),処理名:'ingestSwitchbotWebhook_',結果:'警告',詳細:'未登録の機器からの通知: ZZMAC（S12_機器マスタにMACを登録してください）'})`);
+check('届いているのに機器が分からない場合を、届かない場合と区別する',
+  String(run(`checkWebhookTest_(${JSON.stringify(hookSince)})`)).indexOf('どの機器か分かりませんでした') > 0);
+run(`appendRow(SHEETS.LOG_IMPORT,{log_id:'ZZHOOK2', 発生日:todayStr_(), 対象種別:'raw_switchbot',
+  対象:'ALL', 項目名:'服薬', 値:'開閉：open', 取込元:'switchbot-webhook:ZZLOW', 取込日時:nowStr_()})`);
+check('届いていれば「届きました」と言う',
+  String(run(`checkWebhookTest_(${JSON.stringify(hookSince)})`)).indexOf('届きました') === 0);
+
 // 後片付け
 run(`(function(){
   deleteRowsWhere_(SHEETS.DEVICE, function(r){ return String(r['deviceId']).indexOf('ZZ') === 0; });
   deleteRowsWhere_(SHEETS.LOG_IMPORT, function(r){ return String(r['log_id']).indexOf('ZZ') === 0; });
+  deleteRowsWhere_(SHEETS.RUN_LOG, function(r){ return String(r['詳細']).indexOf('ZZMAC') >= 0; });
 })()`);
 
 console.log('\n=== T38 支援記録の質問は少しずつ始める ===');

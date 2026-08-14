@@ -1851,6 +1851,7 @@ function onOpen() {
     .addItem('SwitchBotの状態を今すぐ取得', 'switchbotPoll')
     .addItem('SwitchBotのWebhookを登録', 'switchbotSetupWebhook')
     .addItem('SwitchBotのWebhookを確認', 'menuQueryWebhook_')
+    .addItem('薬箱の通知が届くか試す', 'menuTestSwitchbotWebhook_')
     .addSeparator()
     .addItem('トリガーを設定する（installTriggers）', 'installTriggers')
     .addToUi();
@@ -7598,6 +7599,85 @@ function menuAddUsersBulk_() {
 }
 
 // ---------------------------------------------------------------------------
+// 薬箱の通知が届いているかを、その場で確かめる
+// ---------------------------------------------------------------------------
+
+/**
+ * SwitchBotの「開いた」通知が届くかを試した結果を作る。
+ *
+ * 【なぜ要るか】
+ * 薬箱が開いたかどうかは、この通知でしか分からない（1時間おきに状態を見ても、
+ * その間に開けて閉めた薬箱は「閉じている」としか映らない）。
+ * ところが通知は、届かなくてもどこにもエラーが出ない。登録は「正常」と出たまま、
+ * 質問だけが材料なしで届き続ける。
+ *
+ * 推測で語らずに済むよう、薬箱を1回開けてもらって白黒つける。
+ * 「届いた／届いていない／届いたが機器が未登録」を区別できるようにしてある。
+ *
+ * @param {string} since この時刻以降を見る（yyyy-MM-dd HH:mm）
+ * @return {string} 結果の説明
+ */
+function checkWebhookTest_(since) {
+  var arrived = findRows(SHEETS.LOG_IMPORT, function (r) {
+    return String(r['取込元']).indexOf('switchbot-webhook:') === 0
+      && String(r['取込日時']) >= since;
+  });
+  if (arrived.length) {
+    return '届きました（' + arrived.length + '件）。\n\n'
+      + '薬箱の開閉をそのまま記録の材料に使えます。'
+      + '服薬の質問は、開けた形跡があれば「（参考）」付きで届きます。';
+  }
+
+  // 届いてはいるが弾かれている場合と、そもそも届いていない場合を分ける
+  var logs = findRows(SHEETS.RUN_LOG, function (r) {
+    return String(r['日時']) >= since;
+  });
+  var unknownDevice = logs.filter(function (r) {
+    return String(r['詳細']).indexOf('未登録の機器からの通知') >= 0;
+  });
+  if (unknownDevice.length) {
+    return '通知は届いていますが、どの機器か分かりませんでした。\n\n'
+      + 'S12_機器マスタにその機器が無いか、有効=FALSE のままです。\n'
+      + 'メニュー「SwitchBot機器を読み込む」を押すと一覧に出ます。';
+  }
+  var rejected = logs.filter(function (r) {
+    return String(r['詳細']).indexOf('不正なリクエスト') >= 0;
+  });
+  if (rejected.length) {
+    return '通知は届いていますが、秘密キーが合わずに弾いています。\n\n'
+      + 'メニュー「SwitchBotのWebhookを登録」を押して登録し直してください'
+      + '（いまのURLで登録し直します）。';
+  }
+
+  return '届きませんでした。\n\n'
+    + 'SwitchBot側からこのURLに通知が来ていません。考えられるのは次の2つです。\n'
+    + '① SwitchBotがGoogleの転送（リダイレクト）を追いかけていない\n'
+    + '② Webhookの登録先が別のURLになっている\n\n'
+    + 'まずメニュー「SwitchBotのWebhookを確認」で②を見てください。\n'
+    + '一致しているのに届かない場合は①です。そのときは薬箱の開閉を材料にできないので、'
+    + '服薬は今までどおり質問でお答えいただく形になります（記録は残ります）。';
+}
+
+/**
+ * メニューから、薬箱の通知が届くかを試す。
+ * @return {void}
+ */
+function menuTestSwitchbotWebhook_() {
+  var ui = SpreadsheetApp.getUi();
+  var since = nowStr_();
+  var res = ui.alert('薬箱の通知が届くか試す',
+    '薬箱の開け閉めがAI Uriboに届いているかを、その場で確かめます。\n\n'
+    + '① この画面を出したまま、薬箱（または開閉センサー）を1回開けて閉める\n'
+    + '② 10秒ほど待ってから「OK」を押す\n\n'
+    + '※S4に開閉の記録が1件入りますが、そのままで構いません。',
+    ui.ButtonSet.OK_CANCEL);
+  if (res !== ui.Button.OK) return;
+  var result = checkWebhookTest_(since);
+  logInfo('menuTestSwitchbotWebhook_', result.split('\n')[0]);
+  ui.alert('結果', result, ui.ButtonSet.OK);
+}
+
+// ---------------------------------------------------------------------------
 // SwitchBotのトークン入力（スクリプトプロパティを手で触らせない）
 // ---------------------------------------------------------------------------
 
@@ -8813,7 +8893,7 @@ function menuSelfTest_() {
 // ============================================================================
 
 /** この全部入りファイルに入っているはずの関数名 @type {Array.<string>} */
-var BUNDLE_FUNCTIONS = ["activeStaffByLineId_","addDays_","addMissingHeaders_","addUser","addUsersBulk","answerChoice_","apiFills_","apiPing_","apiUsers_","appendRow","applyCorrection_","archiveOldRows","archiveSheet_","askCorrection_","askPriority_","batchElapsedSec_","book_","buildDate_","buildMonthlyRows_","buildQuestion_","buildReviewText_","buildStatusText_","cancelSiblingTasks_","certaintyOf_","checkApiStep_","checkAskStep_","checkBatchesRan_","checkBattery_","checkById_","checkConsistency","checkConsistencyBody_","checkDevices_","checkDriveStep_","checkLearning_","checkLineStep_","checkSecretsStep_","checkSecrets_","checkSetup","checkSheetSize_","checkSheetsStep_","checkSiteNames_","checkSlowBatch_","checkSourcesAlive_","checkStaffLinked_","checkStuckQueue_","checkTestMode_","checkTriggersStep_","checkTriggers_","checkWebhookArriving_","checkWriteStep_","cleanupSelfTest_","clearSettingCache","countAutoConfirmed_","countAutoFilled_","countNeedsReview_","createAndSendSet","currentHour_","dailyBackup","dailyBackupBody_","dayOfWeek_","daysBetween_","decideStage_","deleteRowsWhere_","describeStatus_","describeWebhook_","detectDayRow_","detectGaps","detectHeader_","disablePhase2","dispatchPendingGaps_","displayName_","doGet","doPost","effectBySourceLines_","effectLines_","effectStats_","enablePhase2","ensureArchiveSheet_","ensureRestoreGuide_","ensureSheet_","escalationStaff_","excerptAround_","excludeAlreadyAsked_","expandChoices_","exportDiagnostics","fillNightStaffFromShift_","fillPlaceholders_","fillSourceOf_","findRow","findRows","findStaleGaps_","finishTurn_","flushQueue","forSiteOf_","formatMd_","getOrCreateFolder_","getSetting","getSettingNum","guessRole_","handleAlertFeedback_","handleAnswer_","handleApiGet_","handleEvent_","handleNote_","hoursBetween_","hoursSince_","importShiftText","includesReask_","ingestObservations_","ingestSwitchbotWebhook_","initSheets","installTriggers","invalidateCache_","isDeadBattery_","isFirstDigestOfMonth_","isMonthEnd_","isNightKind_","isOfficeStaff_","isQuietHours_","isRehearsal_","isRestKind_","isSiteWord_","isTrue_","isUserCode_","issueRegistrationCode","jsonOut_","lastPolledValue_","learnFromAnswer_","learnKey_","learnLabel_","learnObserve_","learnRow_","learnSpotCheckDue_","learnStage_","learnSummaryLines_","limitAsks_","lineFetch_","lineToken_","listUsers","logError","logInfo","logStart","logWarn","lowBatteryDevices_","makeRegistrationCode_","makeSecret_","markImported_","markReviewed_","matchStaffByName_","median_","menuAddUser_","menuAddUsersBulk_","menuCheckSetup_","menuDiagnostics_","menuDisablePhase2_","menuEnableAllSupport_","menuEnablePhase2_","menuGoLive_","menuGoTest_","menuImportShift_","menuIssueCode_","menuListUsers_","menuMonthlyReport_","menuNightShift_","menuQueryWebhook_","menuQuickStart_","menuRehearseShift_","menuRotateWebhookSecret_","menuSelfTest_","menuSetSecrets_","menuSetSwitchbot_","menuSetWebappUrl_","menuVerifyPaste_","monthDays_","monthlyReport","morningBatch","msgButtons_","msgQuickReply_","msgText_","needsPlanDetection_","nextGapId_","nextMonthStr_","nextSeqId_","nextUserCode_","nightBatch","nightBatchNow","nightSendPlan_","nightShiftReport_","nightShiftStaff_","nightStaffNameOf_","notifyContradictions_","nowStr_","offerCorrection_","onFollow_","onOpen","onPostback_","onTextBody_","onText_","padTwo_","parseHour_","parseMappedRow_","parseMatrixRow_","parsePositionalRow_","parseShiftDate_","parseShiftText_","pendingGaps_","previousMonth_","pushRaw_","quickStart","ratePct_","readTable","readTableFromSheet_","recentAnswers_","recordFill_","referenceLogText_","registerGaps","registerGapsBody_","rehearseShiftRequest","rememberBattery_","removeDefaultSheet_","reopenRecord_","replyRaw_","resolveAssignees_","resolveShiftSite_","retireUser","rotateBackups_","rotateWebhookSecret","ruleR01_","ruleR02_","ruleR04_","ruleR05_","runAutoFill","runAutoFillBody_","safely_","saveReport_","saveShift_","saveSummary_","scanAlerts_","seedChecks_","seedSettings_","seedStaff_","selfCheck","selfCheckBody_","selfTest","selfTestBody_","sendMonthlySummary_","sendNextInSet_","sendToEscalationStaff","sendToStaff","setDisplayName_","setSecrets","setSetting_","setSwitchbotSecrets","setTestMode","sheetToCsv_","sheet_","shiftResultText_","siteOfStaffToday_","siteOfTarget_","sourceSilentMessage_","splitCells_","staffById_","staffByLineId_","startBatchClock_","statusKeys_","supersedeEstimate_","suspectSide_","switchbotFetch_","switchbotHeaders_","switchbotPoll","switchbotQueryWebhook","switchbotSetupWebhook","switchbotSyncDevices","toDateStr_","toDateTimeStr_","todayStr_","truncate_","tryRegisterByCode_","updateRow","validateSignature_","verifyApiKey_","verifyPaste","verifyRequest_","webhookUrl_","weeklyDigest","withLock_","withinBatchBudget_","writeAutoFill_","writeLog","writeMonthlySheet_"];
+var BUNDLE_FUNCTIONS = ["activeStaffByLineId_","addDays_","addMissingHeaders_","addUser","addUsersBulk","answerChoice_","apiFills_","apiPing_","apiUsers_","appendRow","applyCorrection_","archiveOldRows","archiveSheet_","askCorrection_","askPriority_","batchElapsedSec_","book_","buildDate_","buildMonthlyRows_","buildQuestion_","buildReviewText_","buildStatusText_","cancelSiblingTasks_","certaintyOf_","checkApiStep_","checkAskStep_","checkBatchesRan_","checkBattery_","checkById_","checkConsistency","checkConsistencyBody_","checkDevices_","checkDriveStep_","checkLearning_","checkLineStep_","checkSecretsStep_","checkSecrets_","checkSetup","checkSheetSize_","checkSheetsStep_","checkSiteNames_","checkSlowBatch_","checkSourcesAlive_","checkStaffLinked_","checkStuckQueue_","checkTestMode_","checkTriggersStep_","checkTriggers_","checkWebhookArriving_","checkWebhookTest_","checkWriteStep_","cleanupSelfTest_","clearSettingCache","countAutoConfirmed_","countAutoFilled_","countNeedsReview_","createAndSendSet","currentHour_","dailyBackup","dailyBackupBody_","dayOfWeek_","daysBetween_","decideStage_","deleteRowsWhere_","describeStatus_","describeWebhook_","detectDayRow_","detectGaps","detectHeader_","disablePhase2","dispatchPendingGaps_","displayName_","doGet","doPost","effectBySourceLines_","effectLines_","effectStats_","enablePhase2","ensureArchiveSheet_","ensureRestoreGuide_","ensureSheet_","escalationStaff_","excerptAround_","excludeAlreadyAsked_","expandChoices_","exportDiagnostics","fillNightStaffFromShift_","fillPlaceholders_","fillSourceOf_","findRow","findRows","findStaleGaps_","finishTurn_","flushQueue","forSiteOf_","formatMd_","getOrCreateFolder_","getSetting","getSettingNum","guessRole_","handleAlertFeedback_","handleAnswer_","handleApiGet_","handleEvent_","handleNote_","hoursBetween_","hoursSince_","importShiftText","includesReask_","ingestObservations_","ingestSwitchbotWebhook_","initSheets","installTriggers","invalidateCache_","isDeadBattery_","isFirstDigestOfMonth_","isMonthEnd_","isNightKind_","isOfficeStaff_","isQuietHours_","isRehearsal_","isRestKind_","isSiteWord_","isTrue_","isUserCode_","issueRegistrationCode","jsonOut_","lastPolledValue_","learnFromAnswer_","learnKey_","learnLabel_","learnObserve_","learnRow_","learnSpotCheckDue_","learnStage_","learnSummaryLines_","limitAsks_","lineFetch_","lineToken_","listUsers","logError","logInfo","logStart","logWarn","lowBatteryDevices_","makeRegistrationCode_","makeSecret_","markImported_","markReviewed_","matchStaffByName_","median_","menuAddUser_","menuAddUsersBulk_","menuCheckSetup_","menuDiagnostics_","menuDisablePhase2_","menuEnableAllSupport_","menuEnablePhase2_","menuGoLive_","menuGoTest_","menuImportShift_","menuIssueCode_","menuListUsers_","menuMonthlyReport_","menuNightShift_","menuQueryWebhook_","menuQuickStart_","menuRehearseShift_","menuRotateWebhookSecret_","menuSelfTest_","menuSetSecrets_","menuSetSwitchbot_","menuSetWebappUrl_","menuTestSwitchbotWebhook_","menuVerifyPaste_","monthDays_","monthlyReport","morningBatch","msgButtons_","msgQuickReply_","msgText_","needsPlanDetection_","nextGapId_","nextMonthStr_","nextSeqId_","nextUserCode_","nightBatch","nightBatchNow","nightSendPlan_","nightShiftReport_","nightShiftStaff_","nightStaffNameOf_","notifyContradictions_","nowStr_","offerCorrection_","onFollow_","onOpen","onPostback_","onTextBody_","onText_","padTwo_","parseHour_","parseMappedRow_","parseMatrixRow_","parsePositionalRow_","parseShiftDate_","parseShiftText_","pendingGaps_","previousMonth_","pushRaw_","quickStart","ratePct_","readTable","readTableFromSheet_","recentAnswers_","recordFill_","referenceLogText_","registerGaps","registerGapsBody_","rehearseShiftRequest","rememberBattery_","removeDefaultSheet_","reopenRecord_","replyRaw_","resolveAssignees_","resolveShiftSite_","retireUser","rotateBackups_","rotateWebhookSecret","ruleR01_","ruleR02_","ruleR04_","ruleR05_","runAutoFill","runAutoFillBody_","safely_","saveReport_","saveShift_","saveSummary_","scanAlerts_","seedChecks_","seedSettings_","seedStaff_","selfCheck","selfCheckBody_","selfTest","selfTestBody_","sendMonthlySummary_","sendNextInSet_","sendToEscalationStaff","sendToStaff","setDisplayName_","setSecrets","setSetting_","setSwitchbotSecrets","setTestMode","sheetToCsv_","sheet_","shiftResultText_","siteOfStaffToday_","siteOfTarget_","sourceSilentMessage_","splitCells_","staffById_","staffByLineId_","startBatchClock_","statusKeys_","supersedeEstimate_","suspectSide_","switchbotFetch_","switchbotHeaders_","switchbotPoll","switchbotQueryWebhook","switchbotSetupWebhook","switchbotSyncDevices","toDateStr_","toDateTimeStr_","todayStr_","truncate_","tryRegisterByCode_","updateRow","validateSignature_","verifyApiKey_","verifyPaste","verifyRequest_","webhookUrl_","weeklyDigest","withLock_","withinBatchBudget_","writeAutoFill_","writeLog","writeMonthlySheet_"];
 
 /** 収録ファイル数 @type {number} */
 var BUNDLE_FILE_COUNT = 25;
