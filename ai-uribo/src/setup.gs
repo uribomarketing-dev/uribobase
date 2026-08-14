@@ -363,7 +363,9 @@ function onOpen() {
     .addItem('利用者をまとめて登録する', 'menuAddUsersBulk_')
     .addItem('利用者を登録する（1人ずつ）', 'menuAddUser_')
     .addItem('登録済みの利用者を見る', 'menuListUsers_')
-    .addItem('支援記録の質問を開始する（Phase2）', 'menuEnablePhase2_')
+    .addItem('★ 支援記録の質問を開始する（まず5項目）', 'menuEnablePhase2_')
+    .addItem('質問を増やす（慣れてきたら）', 'menuEnableAllSupport_')
+    .addItem('支援記録の質問を止める', 'menuDisablePhase2_')
     .addItem('シフト表を取り込む', 'menuImportShift_')
     .addItem('今日の夜勤を確認する', 'menuNightShift_')
     .addSeparator()
@@ -388,6 +390,7 @@ function onOpen() {
     .addItem('SwitchBot機器を読み込む', 'switchbotSyncDevices')
     .addItem('SwitchBotの状態を今すぐ取得', 'switchbotPoll')
     .addItem('SwitchBotのWebhookを登録', 'switchbotSetupWebhook')
+    .addItem('SwitchBotのWebhookを確認', 'menuQueryWebhook_')
     .addSeparator()
     .addItem('トリガーを設定する（installTriggers）', 'installTriggers')
     .addToUi();

@@ -135,6 +135,7 @@ var DEFAULT_SETTINGS = [
   ['quiet_end_hour', '7', '送信抑止（深夜帯）の終了時刻'],
   ['stage', '1', '運用ステージ（1=まとめ回答/2=担当者ルーティング/3=完全自動）'],
   ['max_items_per_message', '3', '1通に載せる確認の最大件数'],
+  ['max_asks_per_set', '8', '1回の確認セットで聞く上限件数（残りは翌日以降にまわす。多すぎて答える気が失せるのを防ぐ）'],
   ['backup_keep_days', '30', 'dailyバックアップの保持日数（月末分はmonthlyへ退避）'],
   ['backup_folder_name', 'AI_Uribo_Backup', 'バックアップ先フォルダ名'],
   ['line_retry_max', '3', 'LINE送信のリトライ回数'],

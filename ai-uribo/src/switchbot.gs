@@ -165,14 +165,40 @@ function switchbotPoll() {
 
     var date = todayStr_();
     var written = 0;
+    var skippedDead = [];
+    var unreadable = [];
+    var battery = {};
+
     devices.forEach(function (d) {
       safely_(proc + ':' + d['deviceName'], function () {
         var st = switchbotFetch_('/devices/' + encodeURIComponent(String(d['deviceId'])) + '/status');
-        if (!st) return;
+        if (!st) { unreadable.push(String(d['deviceName']) + '（応答なし）'); return; }
         var role = SWITCHBOT_ROLES[String(d['用途種別'])];
         if (!role) return;
+
+        if (st.battery !== undefined) battery[String(d['deviceId'])] = Number(st.battery);
+
+        // 電池が尽きた機器は「値」を持っていても信用しない。
+        // 止まったセンサーが返す「動きなし」は、動きが無かった証拠ではなく、
+        // ただ測れていないだけ。これを材料にすると、夜勤の巡回を
+        // 「していない」と読み違えたまま静かに記録が歪む。
+        if (isDeadBattery_(st.battery)) {
+          skippedDead.push(String(d['deviceName']) + '（電池' + st.battery + '%）');
+          return;
+        }
+
         var value = describeStatus_(String(d['用途種別']), st);
-        if (!value) return;
+        if (!value) {
+          // 黙って捨てない。何が返ってきたのかを残さないと、原因にたどり着けない
+          unreadable.push(String(d['deviceName']) + '（読めた項目：' + statusKeys_(st) + '）');
+          return;
+        }
+
+        // 前と同じ値なら書かない。毎時「状態:close」を積むと台帳が埋まるだけで、
+        // 「いつ変わったか」が見えなくなる（見たいのは変化のほう）
+        var srcId = 'switchbot-poll:' + String(d['deviceId']);
+        if (value === lastPolledValue_(srcId, date)) return;
+
         appendRow(SHEETS.LOG_IMPORT, {
           'log_id': nextSeqId_(SHEETS.LOG_IMPORT, 'log_id', 'LOG', 6),
           '発生日': date,
@@ -180,20 +206,111 @@ function switchbotPoll() {
           '対象': String(d['対象user_code'] || d['拠点'] || 'ALL'),
           '項目名': role.項目名,
           '値': value,
-          '取込元': 'switchbot-poll:' + String(d['deviceId']),
+          '取込元': srcId,
           '取込日時': nowStr_()
         });
         written++;
-        // 電池切れの予兆は先に知らせる（現場が困る前に）
-        if (st.battery !== undefined && Number(st.battery) <= 20) {
-          logWarn(proc, String(d['deviceName']) + ' の電池残量が ' + st.battery + '%');
-        }
       });
     });
-    var summary = '機器 ' + devices.length + '件を取得 / 記録 ' + written + '件';
+
+    rememberBattery_(battery);
+    if (skippedDead.length) {
+      logWarn(proc, '電池切れのため材料に使いませんでした：' + skippedDead.join('、'));
+    }
+    if (unreadable.length) {
+      logWarn(proc, '状態を記録できませんでした：' + unreadable.join('、'));
+    }
+    var summary = '機器 ' + devices.length + '件を確認 / 記録 ' + written + '件（変化があった分だけ）'
+      + (skippedDead.length ? ' / 電池切れで除外 ' + skippedDead.length + '件' : '')
+      + (unreadable.length ? ' / 読めず ' + unreadable.length + '件' : '');
     logInfo(proc, summary);
     return summary;
   }, function () { return '他の処理が実行中のためスキップ'; });
+}
+
+/** 電池がこの割合以下なら、その機器の値は材料に使わない @type {number} */
+var DEAD_BATTERY_PERCENT = 5;
+
+/**
+ * 電池が尽きているか。
+ * @param {*} battery 電池残量（%）
+ * @return {boolean} 尽きていればtrue
+ */
+function isDeadBattery_(battery) {
+  if (battery === undefined || battery === null || battery === '') return false;
+  var n = Number(battery);
+  return !isNaN(n) && n <= DEAD_BATTERY_PERCENT;
+}
+
+/**
+ * 状態に何が入っていたかを短く並べる（原因調査用。値そのものは載せない）。
+ * @param {Object} st statusのbody
+ * @return {string} 項目名を並べた文字列
+ */
+function statusKeys_(st) {
+  var keys = [];
+  for (var k in st) { if (Object.prototype.hasOwnProperty.call(st, k)) keys.push(k); }
+  return keys.length ? keys.join('・') : 'なし';
+}
+
+/**
+ * その取込元で最後に記録した値を返す（同じ値の書き足しを避けるため）。
+ * @param {string} srcId 取込元（switchbot-poll:deviceId）
+ * @param {string} date 対象日 YYYY-MM-DD
+ * @return {string} 最後に記録した値（無ければ空文字）
+ */
+function lastPolledValue_(srcId, date) {
+  var rows = findRows(SHEETS.LOG_IMPORT, function (r) {
+    return String(r['取込元']) === srcId
+      && (toDateStr_(r['発生日']) === date || toDateStr_(r['発生日']) === addDays_(date, -1));
+  });
+  if (!rows.length) return '';
+  var last = rows[rows.length - 1];
+  return String(last['値'] || '');
+}
+
+/**
+ * 電池残量を覚えておく（自己点検が朝にまとめて知らせるため）。
+ * 毎時LINEで知らせると通知だらけになるので、ここでは記録するだけにする。
+ * @param {Object.<string,number>} battery deviceId→残量%
+ * @return {void}
+ */
+function rememberBattery_(battery) {
+  safely_('rememberBattery_', function () {
+    if (!battery) return;
+    var props = PropertiesService.getScriptProperties();
+    var prev = {};
+    safely_('rememberBattery_', function () {
+      prev = JSON.parse(props.getProperty('SWITCHBOT_BATTERY') || '{}');
+    });
+    for (var id in battery) {
+      if (Object.prototype.hasOwnProperty.call(battery, id)) prev[id] = battery[id];
+    }
+    props.setProperty('SWITCHBOT_BATTERY', JSON.stringify(prev));
+  });
+}
+
+/**
+ * 電池が心もとない機器の一覧を返す（自己点検から呼ぶ）。
+ * @param {number} [threshold] この割合以下を対象にする（既定20）
+ * @return {Array.<{name:string, percent:number, dead:boolean}>} 機器の配列
+ */
+function lowBatteryDevices_(threshold) {
+  var limit = threshold === undefined ? 20 : threshold;
+  var map = safely_('lowBatteryDevices_', function () {
+    return JSON.parse(PropertiesService.getScriptProperties().getProperty('SWITCHBOT_BATTERY') || '{}');
+  }, {}) || {};
+
+  var out = [];
+  findRows(SHEETS.DEVICE, function (r) { return isTrue_(r['有効']); }).forEach(function (d) {
+    var id = String(d['deviceId']);
+    if (map[id] === undefined) return;
+    var pct = Number(map[id]);
+    if (isNaN(pct) || pct > limit) return;
+    out.push({ name: String(d['deviceName']), percent: pct, dead: isDeadBattery_(pct) });
+  });
+  out.sort(function (a, b) { return a.percent - b.percent; });
+  return out;
 }
 
 /**
@@ -256,10 +373,38 @@ function switchbotSetupWebhook() {
  * @return {string} 現在の設定
  */
 function switchbotQueryWebhook() {
+  var proc = 'switchbotQueryWebhook';
   var res = switchbotFetch_('/webhook/queryWebhook', 'post', { action: 'queryUrl' });
-  var text = res ? JSON.stringify(res) : '取得できませんでした';
-  logInfo('switchbotQueryWebhook', text);
-  return text;
+  if (!res) {
+    logWarn(proc, '登録先を取得できませんでした（トークン・通信をご確認ください）');
+    return '登録先を取得できませんでした（トークン・通信をご確認ください）';
+  }
+
+  var urls = (res.urls || []).map(String);
+  var mine = webhookUrl_();
+  var match = mine && urls.some(function (u) { return u === mine; });
+
+  // 秘密キー（?k=）は台帳にも画面にも出さない。合っているかどうかだけを言う
+  var text = urls.length
+    ? '登録あり ' + urls.length + '件 / このAI Uriboと' + (match ? '一致しています' : '一致していません')
+    : 'まだ登録されていません';
+  logInfo(proc, text);
+
+  return text + '\n\n'
+    + (match
+      ? '登録は正しく入っています。それでも通知が届かないときは、SwitchBot側から見て\n'
+        + 'このURLに届いていない（GASが転送で応答するため）可能性があります。\n'
+        + 'その場合は薬箱の開閉を材料にできないので、服薬は質問でお答えいただく形になります。'
+      : 'メニュー「SwitchBotのWebhookを登録」を押すと登録し直せます。');
+}
+
+/**
+ * メニューからWebhookの登録先を確認する。
+ * @return {void}
+ */
+function menuQueryWebhook_() {
+  SpreadsheetApp.getUi().alert('SwitchBotのWebhook', switchbotQueryWebhook(),
+    SpreadsheetApp.getUi().ButtonSet.OK);
 }
 
 /**

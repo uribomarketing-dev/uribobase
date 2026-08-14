@@ -138,7 +138,8 @@ const sandbox = {
   PropertiesService: {
     getScriptProperties: () => ({
       getProperty: k => (props[k] === undefined ? null : props[k]),
-      setProperty: (k, v) => { props[k] = v; }
+      setProperty: (k, v) => { props[k] = v; },
+      deleteProperty: k => { delete props[k]; }
     })
   },
   CacheService: {
@@ -569,8 +570,15 @@ console.log('  poll → ' + run('switchbotPoll()'));
 check('温湿度がS4に入る',
   rows('LOG_IMPORT').some(l => String(l.対象種別) === 'raw_meter' && String(l.値).indexOf('室温28.4℃') >= 0),
   rows('LOG_IMPORT').filter(l => String(l.取込元).indexOf('switchbot-poll') === 0).map(l => l.値));
-check('電池残量が少ない機器を警告する',
-  rows('RUN_LOG').some(r => String(r.結果) === '警告' && String(r.詳細).indexOf('電池残量') > 0));
+// 電池は毎時ログに書くのではなく覚えておき、朝の自己点検でまとめて知らせる
+// （1時間おきに同じ警告が並ぶと、本当に見てほしい行が埋もれる）
+check('電池残量を覚えている',
+  run('lowBatteryDevices_(20)').some(d => Number(d.percent) === 15),
+  run('lowBatteryDevices_(20)'));
+// 状態が読めなかった機器は黙って捨てず、何が返ってきたかを残す
+check('状態を記録できなかった機器を黙って捨てない',
+  rows('RUN_LOG').some(r => String(r.結果) === '警告' && String(r.詳細).indexOf('状態を記録できませんでした') >= 0),
+  rows('RUN_LOG').filter(r => String(r.処理名) === 'switchbotPoll').map(r => r.詳細));
 
 // SwitchBotのWebhook（服薬ボックスが開いた）
 const sbHook = { eventType: 'changeReport', eventVersion: '1', context: {
@@ -1113,6 +1121,8 @@ run(`(function(){
     .forEach(function(r){updateRow(SHEETS.LEARN,r._row,{'段階':'確認中'});});
   findRows(SHEETS.TASK,function(r){return String(r['送信状態'])==='テスト';})
     .forEach(function(r){updateRow(SHEETS.TASK,r._row,{'送信状態':'送信済'});});
+  // 電池も入れ替えた状態にする（残りわずかなら、それは知らせるべき問題）
+  PropertiesService.getScriptProperties().deleteProperty('SWITCHBOT_BATTERY');
 })()`);
 pushes.length = 0;
 const quietResult = run('selfCheck()');
@@ -2058,6 +2068,150 @@ run(`(function(){
 pushes.length = 0;
 run(`dispatchPendingGaps_(function(g){return String(g['gap_id'])==='GAP-REMIND-1';},'【確認】','remindTest')`);
 check('答えていただいた項目は聞き直さない', pushes.length === 0, pushes.length);
+
+console.log('\n=== T36 質問を出しすぎない ===');
+// 利用者4名 × 支援記録6項目 = 初日から24件。正しくても、24回ボタンを押させる仕組みは使われない。
+// 上限を超えた分は捨てずに残し、翌日また対象になる
+run(`(function(){
+  ['ZZL1','ZZL2','ZZL3'].forEach(function(c){
+    if (!findRow(SHEETS.USER,{'user_code':c})) {
+      appendRow(SHEETS.USER,{user_code:c, 拠点:'清水', 有効:true});
+    }
+  });
+  deleteRowsWhere_(SHEETS.GAP, function(r){ return String(r['gap_id']).indexOf('ZZLIM') === 0; });
+  var n = 0;
+  ['ZZL1','ZZL2','ZZL3'].forEach(function(c){
+    ['CHK101','CHK105','CHK106','CHK111','CHK112'].forEach(function(ck){
+      n++;
+      appendRow(SHEETS.GAP,{gap_id:'ZZLIM'+n, 対象日:todayStr_(), check_id:ck, 対象:c,
+        状態:GAP_STATUS.DETECTED, 検出日時:nowStr_()});
+    });
+  });
+})()`);
+const limGaps = () => run(`findRows(SHEETS.GAP, function(r){ return String(r['gap_id']).indexOf('ZZLIM')===0; })`);
+check('試験用の不足を15件用意した', limGaps().length === 15, limGaps().length);
+
+const picked = run(`limitAsks_(findRows(SHEETS.GAP, function(r){ return String(r['gap_id']).indexOf('ZZLIM')===0; }))`);
+check('1回にお送りするのは上限まで（既定8件）', picked.length === 8, picked.length);
+check('優先度Aを先に聞く（あとから思い出せないものが後回しにならない）',
+  picked.every(g => ['CHK101', 'CHK105', 'CHK106'].indexOf(String(g.check_id)) >= 0),
+  picked.map(g => g.check_id));
+check('同じ利用者の質問が固まらない（不在の日に全部わからないになるのを避ける）',
+  new Set(picked.slice(0, 3).map(g => String(g.対象))).size === 3,
+  picked.slice(0, 3).map(g => g.対象));
+check('上限を下回るときはそのまま全部聞く',
+  run(`limitAsks_([{gap_id:'a',check_id:'CHK101',対象:'ZZL1',対象日:todayStr_()}])`).length === 1);
+// 上限を超えた分は「捨てた」のではなく「まわした」。S5の不足はそのまま残る
+check('聞かなかった分の不足は消えない（翌日また対象になる）', limGaps().length === 15, limGaps().length);
+
+run(`(function(){
+  var r=findRow(SHEETS.SETTING,{'キー':'max_asks_per_set'});updateRow(SHEETS.SETTING,r._row,{'値':'0'});
+  clearSettingCache();
+})()`);
+check('上限を0にすると絞らない（止めたい人の逃げ道）',
+  run(`limitAsks_(findRows(SHEETS.GAP, function(r){ return String(r['gap_id']).indexOf('ZZLIM')===0; }))`).length === 15);
+run(`(function(){
+  var r=findRow(SHEETS.SETTING,{'キー':'max_asks_per_set'});updateRow(SHEETS.SETTING,r._row,{'値':'8'});
+  clearSettingCache();
+  deleteRowsWhere_(SHEETS.GAP, function(r){ return String(r['gap_id']).indexOf('ZZLIM') === 0; });
+  deleteRowsWhere_(SHEETS.USER, function(r){ return String(r['user_code']).indexOf('ZZL') === 0; });
+})()`);
+
+console.log('\n=== T37 電池が切れたセンサーを信じない ===');
+// 止まったセンサーは、エラーではなく「古い値」を返し続ける。
+// その「動きなし」を材料にすると、夜勤の巡回を「していない」と読み違えたまま記録が歪む
+check('電池0%は「尽きた」と見なす', run('isDeadBattery_(0)') === true);
+check('電池5%も材料には使わない', run('isDeadBattery_(5)') === true);
+check('電池20%はまだ使う（残りわずかなだけ）', run('isDeadBattery_(20)') === false);
+check('電池の値を返さない機器を、勝手に電池切れ扱いしない',
+  run('isDeadBattery_(undefined)') === false && run(`isDeadBattery_('')`) === false);
+
+run(`(function(){
+  if (!findRow(SHEETS.DEVICE,{'deviceId':'ZZDEAD'})) {
+    appendRow(SHEETS.DEVICE,{deviceId:'ZZDEAD', deviceName:'試験_人感', deviceType:'Motion Sensor',
+      拠点:'清水', 対象user_code:'', 用途種別:'人感', 有効:true});
+  }
+  if (!findRow(SHEETS.DEVICE,{'deviceId':'ZZLOW'})) {
+    appendRow(SHEETS.DEVICE,{deviceId:'ZZLOW', deviceName:'試験_薬箱', deviceType:'Contact Sensor',
+      拠点:'清水', 対象user_code:'', 用途種別:'服薬ボックス', 有効:true});
+  }
+  rememberBattery_({ZZDEAD:0, ZZLOW:20});
+})()`);
+const lowBatt = run('lowBatteryDevices_(20)');
+check('電池が心もとない機器を拾える', lowBatt.length === 2, lowBatt.map(d => d.name + ':' + d.percent));
+check('尽きた機器と、残りわずかな機器を区別する',
+  lowBatt.filter(d => d.dead).length === 1 && String(lowBatt[0].name) === '試験_人感', lowBatt);
+const battIssues = run(`(function(){ var a=[]; checkBattery_(a); return a; })()`);
+check('朝の自己点検で、電池切れを社員に知らせる',
+  battIssues.some(m => String(m).indexOf('試験_人感') >= 0 && String(m).indexOf('材料に使っていません') > 0),
+  battIssues);
+check('なぜ材料に使わないのかまで書いてある',
+  battIssues.some(m => String(m).indexOf('読み違え') > 0), battIssues);
+
+// 同じ値を毎時書き足さない（「いつ変わったか」が見えなくなるため）
+run(`(function(){
+  appendRow(SHEETS.LOG_IMPORT,{log_id:'ZZPOLL1', 発生日:todayStr_(), 対象種別:'raw_switchbot',
+    対象:'ALL', 項目名:'服薬', 値:'状態:close', 取込元:'switchbot-poll:ZZLOW', 取込日時:nowStr_()});
+})()`);
+check('前と同じ値なら書き足さない', run(`lastPolledValue_('switchbot-poll:ZZLOW', todayStr_())`) === '状態:close');
+check('前の値が無ければ空を返す（初回は必ず記録する）',
+  run(`lastPolledValue_('switchbot-poll:ZZNONE', todayStr_())`) === '');
+
+// 読めなかったときに黙って捨てない
+check('状態に何が入っていたかを残せる',
+  String(run(`statusKeys_({battery:0, version:'V1.2'})`)) === 'battery・version');
+check('何も入っていなければ「なし」', String(run('statusKeys_({})')) === 'なし');
+
+// 「開いた・動いた」の通知が一度も届かない状態に気づく
+// （前のテストで入れた通知を外して、届いていない状態を作る）
+run(`deleteRowsWhere_(SHEETS.LOG_IMPORT, function(r){
+  return String(r['取込元']).indexOf('switchbot-webhook:') === 0;
+})`);
+const hookIssues = run(`(function(){ var a=[]; checkWebhookArriving_(a); return a; })()`);
+check('薬箱の開閉通知が届いていないことに気づく',
+  hookIssues.some(m => String(m).indexOf('届いていません') > 0), hookIssues);
+check('届かないと何が困るのかを書いてある',
+  hookIssues.some(m => String(m).indexOf('服薬の材料') > 0), hookIssues);
+run(`(function(){
+  appendRow(SHEETS.LOG_IMPORT,{log_id:'ZZHOOK1', 発生日:todayStr_(), 対象種別:'raw_switchbot',
+    対象:'ALL', 項目名:'服薬', 値:'開閉：open', 取込元:'switchbot-webhook:ZZLOW', 取込日時:nowStr_()});
+})()`);
+check('届いていれば知らせない',
+  run(`(function(){ var a=[]; checkWebhookArriving_(a); return a; })()`).length === 0);
+
+// 後片付け
+run(`(function(){
+  deleteRowsWhere_(SHEETS.DEVICE, function(r){ return String(r['deviceId']).indexOf('ZZ') === 0; });
+  deleteRowsWhere_(SHEETS.LOG_IMPORT, function(r){ return String(r['log_id']).indexOf('ZZ') === 0; });
+})()`);
+
+console.log('\n=== T38 支援記録の質問は少しずつ始める ===');
+// 優先度Aは11項目。利用者4名なら初日から44件になる。
+// 答えきれない質問が毎日積み上がると、仕組みそのものが使われなくなる
+run(`(function(){
+  findRows(SHEETS.CHECK, function(r){
+    return ['support','plan'].indexOf(String(r['対象種別'])) >= 0;
+  }).forEach(function(c){ updateRow(SHEETS.CHECK, c._row, {'有効': false}); });
+  checkById_._map = null;
+})()`);
+const starterMsg = String(run('enablePhase2()'));
+const onNow = () => run(`findRows(SHEETS.CHECK, function(r){
+  return ['support','plan'].indexOf(String(r['対象種別'])) >= 0 && isTrue_(r['有効']);
+})`).map(c => String(c.check_id));
+check('まず5項目だけ始める', onNow().length === 5, onNow());
+check('あとから思い出せないもの・実費請求の根拠になるものを選んでいる',
+  ['CHK101', 'CHK105', 'CHK106', 'CHK204', 'CHK205'].every(id => onNow().indexOf(id) >= 0), onNow());
+check('1日あたり何件になるかを先に伝える', starterMsg.indexOf('1日あたり最大') > 0, starterMsg.substring(0, 300));
+check('まだ始めていない項目が残っていることを伝える',
+  starterMsg.indexOf('質問を増やす') > 0, starterMsg.substring(0, 400));
+
+const allMsg = String(run('enablePhase2(true)'));
+check('「質問を増やす」で残りの優先度Aが入る', onNow().length > 5, onNow().length);
+check('増やしたあとは、残りがあるとは言わない', allMsg.indexOf('質問を増やす') < 0, allMsg.substring(0, 300));
+check('もう一度押しても二重にならない',
+  String(run('enablePhase2(true)')).indexOf('すでに開始しています') > 0);
+run('disablePhase2()');
+check('多すぎたらいつでも静かにできる', onNow().length === 0, onNow());
 
 console.log('\n=== T18 GAS貼り付け用の全部入りファイル ===');
 // 1万行のコピーは静かに切れる。切れたまま動くのがいちばん厄介なので、

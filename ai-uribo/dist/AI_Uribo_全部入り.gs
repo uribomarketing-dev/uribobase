@@ -151,6 +151,7 @@ var DEFAULT_SETTINGS = [
   ['quiet_end_hour', '7', '送信抑止（深夜帯）の終了時刻'],
   ['stage', '1', '運用ステージ（1=まとめ回答/2=担当者ルーティング/3=完全自動）'],
   ['max_items_per_message', '3', '1通に載せる確認の最大件数'],
+  ['max_asks_per_set', '8', '1回の確認セットで聞く上限件数（残りは翌日以降にまわす。多すぎて答える気が失せるのを防ぐ）'],
   ['backup_keep_days', '30', 'dailyバックアップの保持日数（月末分はmonthlyへ退避）'],
   ['backup_folder_name', 'AI_Uribo_Backup', 'バックアップ先フォルダ名'],
   ['line_retry_max', '3', 'LINE送信のリトライ回数'],
@@ -1822,7 +1823,9 @@ function onOpen() {
     .addItem('利用者をまとめて登録する', 'menuAddUsersBulk_')
     .addItem('利用者を登録する（1人ずつ）', 'menuAddUser_')
     .addItem('登録済みの利用者を見る', 'menuListUsers_')
-    .addItem('支援記録の質問を開始する（Phase2）', 'menuEnablePhase2_')
+    .addItem('★ 支援記録の質問を開始する（まず5項目）', 'menuEnablePhase2_')
+    .addItem('質問を増やす（慣れてきたら）', 'menuEnableAllSupport_')
+    .addItem('支援記録の質問を止める', 'menuDisablePhase2_')
     .addItem('シフト表を取り込む', 'menuImportShift_')
     .addItem('今日の夜勤を確認する', 'menuNightShift_')
     .addSeparator()
@@ -1847,6 +1850,7 @@ function onOpen() {
     .addItem('SwitchBot機器を読み込む', 'switchbotSyncDevices')
     .addItem('SwitchBotの状態を今すぐ取得', 'switchbotPoll')
     .addItem('SwitchBotのWebhookを登録', 'switchbotSetupWebhook')
+    .addItem('SwitchBotのWebhookを確認', 'menuQueryWebhook_')
     .addSeparator()
     .addItem('トリガーを設定する（installTriggers）', 'installTriggers')
     .addToUi();
@@ -1991,7 +1995,29 @@ function listUsers() {
  * 「動いていない」ように見えてしまうため、登録を確認してから有効化する。
  * @return {string} 実行結果のメッセージ
  */
-function enablePhase2() {
+/**
+ * まず始める5項目。
+ *
+ * 【なぜ全部いっぺんに始めないか】
+ * 優先度Aは11項目ある。利用者4名なら初日から44件の質問になり、
+ * 「1〜2分で終わる」どころではなくなる。答えきれない質問が毎日積み上がると、
+ * 仕組みそのものが使われなくなる。
+ *
+ * 選んだ基準は「あとから思い出して書けないもの」と「実費請求の根拠になるもの」。
+ * 慣れてきたらメニュー「質問を増やす」で残りを足せる。
+ * @type {Array.<string>}
+ */
+var SUPPORT_STARTER_CHECKS = ['CHK101', 'CHK105', 'CHK106', 'CHK204', 'CHK205'];
+
+/**
+ * 支援記録の質問（Phase2の優先度A）を開始する。
+ *
+ * 利用者が1人も登録されていないうちに開始すると、質問が作られないまま
+ * 「動いていない」ように見えてしまうため、登録を確認してから有効化する。
+ * @param {boolean} [all] trueなら優先度Aを全部。省略時はまず5項目だけ
+ * @return {string} 実行結果のメッセージ
+ */
+function enablePhase2(all) {
   var proc = 'enablePhase2';
   return withLock_(proc, 20000, function () {
     var users = findRows(SHEETS.USER, function (r) { return isTrue_(r['有効']); });
@@ -1999,24 +2025,41 @@ function enablePhase2() {
       return '利用者がまだ登録されていません。先にメニュー「利用者を登録する」から登録してください。';
     }
 
+    var starter = {};
+    SUPPORT_STARTER_CHECKS.forEach(function (id) { starter[id] = true; });
+
     var enabled = [];
     findRows(SHEETS.CHECK, function (r) {
       return String(r['優先度']) === 'A'
         && String(r['判定ルールID']) !== '-'
         && ['support', 'plan'].indexOf(String(r['対象種別'])) >= 0
-        && !isTrue_(r['有効']);
+        && !isTrue_(r['有効'])
+        && (all === true || starter[String(r['check_id'])]);
     }).forEach(function (c) {
       updateRow(SHEETS.CHECK, c._row, { '有効': true });
       enabled.push(String(c['check_id']) + ' ' + String(c['項目名']));
     });
     checkById_._map = null;
 
+    var rest = findRows(SHEETS.CHECK, function (r) {
+      return String(r['優先度']) === 'A'
+        && String(r['判定ルールID']) !== '-'
+        && ['support', 'plan'].indexOf(String(r['対象種別'])) >= 0
+        && !isTrue_(r['有効']);
+    }).length;
+
     var summary = enabled.length
       ? '支援記録の質問を開始しました（' + enabled.length + '項目）：\n・' + enabled.join('\n・')
       : '支援記録の質問はすでに開始しています。';
     logInfo(proc, summary.replace(/\n/g, ' / '));
-    return summary + '\n\n利用者' + users.length + '名が対象です。'
-      + '翌朝10:00の確認から質問が届きます（すぐ試すならメニュー「朝バッチを今すぐ実行」）。';
+
+    var perDay = enabled.length * users.length;
+    return summary + '\n\n利用者' + users.length + '名が対象です'
+      + (perDay ? '（1日あたり最大' + perDay + '件。'
+        + '1回にお送りするのは' + getSettingNum('max_asks_per_set', 8) + '件までで、残りは翌日にまわります）' : '')
+      + (rest ? '\n\nまだ始めていない項目が' + rest + 'あります。'
+        + '慣れてきたらメニュー「質問を増やす」で足してください。' : '')
+      + '\n\n翌朝10:00の確認から質問が届きます（すぐ試すならメニュー「朝バッチを今すぐ実行」）。';
   });
 }
 
@@ -2071,11 +2114,55 @@ function menuListUsers_() {
  */
 function menuEnablePhase2_() {
   var ui = SpreadsheetApp.getUi();
+  var users = findRows(SHEETS.USER, function (r) { return isTrue_(r['有効']); }).length;
   var res = ui.alert('支援記録の質問を開始しますか？',
-    listUsers() + '\n\nこの方々について、毎日の支援記録の確認（在否・食事・服薬など）が始まります。',
+    listUsers()
+    + '\n\nまず5項目（在否・食事提供・服薬・帰省予定・食事予定）から始めます。'
+    + '\nあとから思い出して書けないもの、実費請求の根拠になるものを選んでいます。'
+    + '\n\n1日あたり最大' + (users * 5) + '件。1回にお送りするのは'
+    + getSettingNum('max_asks_per_set', 8) + '件までです。'
+    + '\n多いと感じたらメニュー「支援記録の質問を止める」でいつでも静かにできます。',
     ui.ButtonSet.OK_CANCEL);
   if (res !== ui.Button.OK) return;
   ui.alert('支援記録の質問', enablePhase2(), ui.ButtonSet.OK);
+}
+
+/**
+ * メニューから支援記録の質問を止める。
+ * @return {void}
+ */
+function menuDisablePhase2_() {
+  var ui = SpreadsheetApp.getUi();
+  if (ui.alert('支援記録の質問を止めますか？',
+    '毎日の支援記録の確認を止めます。シフト希望の確認は続きます。\n'
+    + 'あとから「支援記録の質問を開始する」でいつでも再開できます。',
+    ui.ButtonSet.OK_CANCEL) !== ui.Button.OK) return;
+  ui.alert('支援記録の質問', disablePhase2(), ui.ButtonSet.OK);
+}
+
+/**
+ * メニューから残りの質問項目を足す。
+ * @return {void}
+ */
+function menuEnableAllSupport_() {
+  var ui = SpreadsheetApp.getUi();
+  var rest = findRows(SHEETS.CHECK, function (r) {
+    return String(r['優先度']) === 'A'
+      && String(r['判定ルールID']) !== '-'
+      && ['support', 'plan'].indexOf(String(r['対象種別'])) >= 0
+      && !isTrue_(r['有効']);
+  });
+  if (!rest.length) {
+    ui.alert('質問を増やす', '優先度Aの項目はすべて開始済みです。', ui.ButtonSet.OK);
+    return;
+  }
+  var res = ui.alert('質問を増やしますか？',
+    '次の' + rest.length + '項目を足します：\n・'
+    + rest.map(function (r) { return String(r['項目名']); }).join('\n・')
+    + '\n\n毎日の質問が増えます。よろしいですか？',
+    ui.ButtonSet.OK_CANCEL);
+  if (res !== ui.Button.OK) return;
+  ui.alert('質問を増やす', enablePhase2(true), ui.ButtonSet.OK);
 }
 
 // ============================================================================
@@ -3952,6 +4039,10 @@ function createAndSendSet(staffId, gaps, title) {
   var proc = 'createAndSendSet';
   if (!gaps || !gaps.length) return { setId: '', count: 0, sent: false };
 
+  var all = gaps.length;
+  gaps = limitAsks_(gaps);
+  var deferred = all - gaps.length;
+
   var setId = nextSeqId_(SHEETS.TASK, 'セットid', 'SET', 5);
   gaps.forEach(function (g, i) {
     appendRow(SHEETS.TASK, {
@@ -3966,10 +4057,72 @@ function createAndSendSet(staffId, gaps, title) {
     });
   });
 
-  var intro = msgText_(title + '\n全' + gaps.length + '件です。ボタンで順番にお答えください。');
+  var intro = msgText_(title + '\n全' + gaps.length + '件です。ボタンで順番にお答えください。'
+    + (deferred ? '\n（ほか' + deferred + '件は明日以降にまわしました。一度にお願いしすぎないためです）' : ''));
   var result = sendNextInSet_(setId, null, [intro]);
-  logInfo(proc, staffId + ' へ ' + gaps.length + '件の確認セット（' + setId + '）を作成 / 送信=' + result);
-  return { setId: setId, count: gaps.length, sent: (result === SEND_RESULT.SENT) };
+  logInfo(proc, staffId + ' へ ' + gaps.length + '件の確認セット（' + setId + '）を作成 / 送信=' + result
+    + (deferred ? ' / 見送り' + deferred + '件' : ''));
+  return { setId: setId, count: gaps.length, sent: (result === SEND_RESULT.SENT), deferred: deferred };
+}
+
+/**
+ * 1回のセットで聞く件数を上限までに絞る。
+ *
+ * 【なぜ要るか】
+ * 利用者が4名、支援記録の項目が6つあると、それだけで1日24件になる。
+ * 24回ボタンを押させる仕組みは、たとえ正しくても使われなくなる。
+ * 上限を超えた分は捨てずに残し（S5の不足はそのまま）、翌日また対象になる。
+ *
+ * 絞る順番は「答えないと困る順」：優先度A → 古い日付 → 同じ利用者が続かないよう散らす。
+ * 同じ人の質問が固まると、その人が不在の日は全部「わからない」になりやすいため。
+ *
+ * @param {Array.<Object>} gaps S5の行オブジェクトの配列
+ * @return {Array.<Object>} 上限まで絞った配列
+ */
+function limitAsks_(gaps) {
+  var max = getSettingNum('max_asks_per_set', 8);
+  if (!(max > 0) || gaps.length <= max) return gaps;
+
+  var sorted = gaps.slice().sort(function (a, b) {
+    var pa = askPriority_(a);
+    var pb = askPriority_(b);
+    if (pa !== pb) return pa - pb;
+    var da = String(a['対象日'] || '');
+    var db = String(b['対象日'] || '');
+    if (da !== db) return da < db ? -1 : 1;
+    return 0;
+  });
+
+  // 同じ利用者が連続しないよう、利用者ごとに1件ずつ拾っていく
+  var byTarget = {};
+  var order = [];
+  sorted.forEach(function (g) {
+    var t = String(g['対象'] || '');
+    if (!byTarget[t]) { byTarget[t] = []; order.push(t); }
+    byTarget[t].push(g);
+  });
+
+  var picked = [];
+  while (picked.length < max) {
+    var addedThisRound = false;
+    for (var i = 0; i < order.length && picked.length < max; i++) {
+      var q = byTarget[order[i]];
+      if (q.length) { picked.push(q.shift()); addedThisRound = true; }
+    }
+    if (!addedThisRound) break;
+  }
+  return picked;
+}
+
+/**
+ * 不足の優先順位（小さいほど先に聞く）。
+ * @param {Object} gap S5の行
+ * @return {number} 0=優先度A / 1=優先度B / 2=それ以外
+ */
+function askPriority_(gap) {
+  var check = safely_('askPriority_', function () { return checkById_(gap['check_id']); }, null);
+  var p = check ? String(check['優先度']) : '';
+  return p === 'A' ? 0 : p === 'B' ? 1 : 2;
 }
 
 /**
@@ -6476,6 +6629,8 @@ function selfCheckBody_(proc) {
   safely_(proc, function () { checkStuckQueue_(issues); });
   safely_(proc, function () { checkTestMode_(issues); });
   safely_(proc, function () { checkDevices_(issues); });
+  safely_(proc, function () { checkBattery_(issues); });
+  safely_(proc, function () { checkWebhookArriving_(issues); });
   safely_(proc, function () { checkSourcesAlive_(issues); });
   safely_(proc, function () { checkLearning_(issues); });
   safely_(proc, function () { checkSheetSize_(issues); });
@@ -6646,6 +6801,70 @@ function checkDevices_(issues) {
     issues.push('3日間なにも届いていない機器があります：'
       + silent.slice(0, 5).map(function (d) { return String(d['deviceName']); }).join('・')
       + '（電池切れ・置き場所の変更かもしれません）');
+  }
+}
+
+/** 変化した瞬間にWebhookで届くはずの用途種別 @type {Array.<string>} */
+var EVENT_DRIVEN_ROLES = ['服薬ボックス', '玄関', '居室ドア', '人感', '漏水'];
+
+/**
+ * 「開いた・動いた」の通知が一度も届いていないことに気づく。
+ *
+ * 【なぜ要るか】
+ * 開閉センサーは、状態を取りに行くだけでは役に立たない。1時間おきに見ても、
+ * その間に開けて閉めた薬箱は「閉じている」としか映らない。
+ * だから服薬の材料はWebhook（変化した瞬間の通知）だけが頼りになる。
+ *
+ * ところがWebhookは、届かなくてもどこにもエラーが出ない。
+ * 登録は「正常」と出たまま、質問だけが材料なしで届き続ける。
+ * 薬箱が毎日開くはずの日数ぶん沈黙していたら、それは静かな故障とみなす。
+ *
+ * @param {Array.<string>} issues 要対応の配列（追記される）
+ * @return {void}
+ */
+function checkWebhookArriving_(issues) {
+  var devices = findRows(SHEETS.DEVICE, function (r) {
+    return isTrue_(r['有効']) && EVENT_DRIVEN_ROLES.indexOf(String(r['用途種別'])) >= 0;
+  });
+  if (!devices.length) return;
+
+  var since = addDays_(todayStr_(), -2);
+  var arrived = findRows(SHEETS.LOG_IMPORT, function (r) {
+    return toDateStr_(r['発生日']) >= since
+      && String(r['取込元']).indexOf('switchbot-webhook:') === 0;
+  }).length;
+  if (arrived) return;
+
+  issues.push('SwitchBotの「開いた・動いた」通知が2日間ひとつも届いていません（対象'
+    + devices.length + '台）。薬箱の開閉はこの通知でしか分からないため、'
+    + '服薬の材料が入らないままになります。メニュー「SwitchBotのWebhookを確認」で登録先をご確認ください');
+}
+
+/**
+ * 電池が心もとない機器を朝にまとめて知らせる。
+ *
+ * 電池が尽きたセンサーは、エラーを出さずに古い値を返し続ける。
+ * その「動きなし」を材料にすると、記録が静かに歪む（switchbotPollでは除外している）。
+ * 除外している間は材料が減るだけなので、交換してもらうまでが一区切り。
+ *
+ * @param {Array.<string>} issues 要対応の配列（追記される）
+ * @return {void}
+ */
+function checkBattery_(issues) {
+  var low = lowBatteryDevices_(20);
+  if (!low.length) return;
+
+  var dead = low.filter(function (d) { return d.dead; });
+  if (dead.length) {
+    issues.push('電池が切れている機器があります：'
+      + dead.map(function (d) { return d.name + '（' + d.percent + '%）'; }).join('、')
+      + '。この機器の値は材料に使っていません（止まったセンサーの「動きなし」を'
+      + '「動きが無かった」と読み違えないためです）。電池を替えると自動で戻ります');
+  }
+  var soon = low.filter(function (d) { return !d.dead; });
+  if (soon.length) {
+    issues.push('電池が残りわずかな機器があります：'
+      + soon.map(function (d) { return d.name + '（' + d.percent + '%）'; }).join('、'));
   }
 }
 
@@ -7593,14 +7812,40 @@ function switchbotPoll() {
 
     var date = todayStr_();
     var written = 0;
+    var skippedDead = [];
+    var unreadable = [];
+    var battery = {};
+
     devices.forEach(function (d) {
       safely_(proc + ':' + d['deviceName'], function () {
         var st = switchbotFetch_('/devices/' + encodeURIComponent(String(d['deviceId'])) + '/status');
-        if (!st) return;
+        if (!st) { unreadable.push(String(d['deviceName']) + '（応答なし）'); return; }
         var role = SWITCHBOT_ROLES[String(d['用途種別'])];
         if (!role) return;
+
+        if (st.battery !== undefined) battery[String(d['deviceId'])] = Number(st.battery);
+
+        // 電池が尽きた機器は「値」を持っていても信用しない。
+        // 止まったセンサーが返す「動きなし」は、動きが無かった証拠ではなく、
+        // ただ測れていないだけ。これを材料にすると、夜勤の巡回を
+        // 「していない」と読み違えたまま静かに記録が歪む。
+        if (isDeadBattery_(st.battery)) {
+          skippedDead.push(String(d['deviceName']) + '（電池' + st.battery + '%）');
+          return;
+        }
+
         var value = describeStatus_(String(d['用途種別']), st);
-        if (!value) return;
+        if (!value) {
+          // 黙って捨てない。何が返ってきたのかを残さないと、原因にたどり着けない
+          unreadable.push(String(d['deviceName']) + '（読めた項目：' + statusKeys_(st) + '）');
+          return;
+        }
+
+        // 前と同じ値なら書かない。毎時「状態:close」を積むと台帳が埋まるだけで、
+        // 「いつ変わったか」が見えなくなる（見たいのは変化のほう）
+        var srcId = 'switchbot-poll:' + String(d['deviceId']);
+        if (value === lastPolledValue_(srcId, date)) return;
+
         appendRow(SHEETS.LOG_IMPORT, {
           'log_id': nextSeqId_(SHEETS.LOG_IMPORT, 'log_id', 'LOG', 6),
           '発生日': date,
@@ -7608,20 +7853,111 @@ function switchbotPoll() {
           '対象': String(d['対象user_code'] || d['拠点'] || 'ALL'),
           '項目名': role.項目名,
           '値': value,
-          '取込元': 'switchbot-poll:' + String(d['deviceId']),
+          '取込元': srcId,
           '取込日時': nowStr_()
         });
         written++;
-        // 電池切れの予兆は先に知らせる（現場が困る前に）
-        if (st.battery !== undefined && Number(st.battery) <= 20) {
-          logWarn(proc, String(d['deviceName']) + ' の電池残量が ' + st.battery + '%');
-        }
       });
     });
-    var summary = '機器 ' + devices.length + '件を取得 / 記録 ' + written + '件';
+
+    rememberBattery_(battery);
+    if (skippedDead.length) {
+      logWarn(proc, '電池切れのため材料に使いませんでした：' + skippedDead.join('、'));
+    }
+    if (unreadable.length) {
+      logWarn(proc, '状態を記録できませんでした：' + unreadable.join('、'));
+    }
+    var summary = '機器 ' + devices.length + '件を確認 / 記録 ' + written + '件（変化があった分だけ）'
+      + (skippedDead.length ? ' / 電池切れで除外 ' + skippedDead.length + '件' : '')
+      + (unreadable.length ? ' / 読めず ' + unreadable.length + '件' : '');
     logInfo(proc, summary);
     return summary;
   }, function () { return '他の処理が実行中のためスキップ'; });
+}
+
+/** 電池がこの割合以下なら、その機器の値は材料に使わない @type {number} */
+var DEAD_BATTERY_PERCENT = 5;
+
+/**
+ * 電池が尽きているか。
+ * @param {*} battery 電池残量（%）
+ * @return {boolean} 尽きていればtrue
+ */
+function isDeadBattery_(battery) {
+  if (battery === undefined || battery === null || battery === '') return false;
+  var n = Number(battery);
+  return !isNaN(n) && n <= DEAD_BATTERY_PERCENT;
+}
+
+/**
+ * 状態に何が入っていたかを短く並べる（原因調査用。値そのものは載せない）。
+ * @param {Object} st statusのbody
+ * @return {string} 項目名を並べた文字列
+ */
+function statusKeys_(st) {
+  var keys = [];
+  for (var k in st) { if (Object.prototype.hasOwnProperty.call(st, k)) keys.push(k); }
+  return keys.length ? keys.join('・') : 'なし';
+}
+
+/**
+ * その取込元で最後に記録した値を返す（同じ値の書き足しを避けるため）。
+ * @param {string} srcId 取込元（switchbot-poll:deviceId）
+ * @param {string} date 対象日 YYYY-MM-DD
+ * @return {string} 最後に記録した値（無ければ空文字）
+ */
+function lastPolledValue_(srcId, date) {
+  var rows = findRows(SHEETS.LOG_IMPORT, function (r) {
+    return String(r['取込元']) === srcId
+      && (toDateStr_(r['発生日']) === date || toDateStr_(r['発生日']) === addDays_(date, -1));
+  });
+  if (!rows.length) return '';
+  var last = rows[rows.length - 1];
+  return String(last['値'] || '');
+}
+
+/**
+ * 電池残量を覚えておく（自己点検が朝にまとめて知らせるため）。
+ * 毎時LINEで知らせると通知だらけになるので、ここでは記録するだけにする。
+ * @param {Object.<string,number>} battery deviceId→残量%
+ * @return {void}
+ */
+function rememberBattery_(battery) {
+  safely_('rememberBattery_', function () {
+    if (!battery) return;
+    var props = PropertiesService.getScriptProperties();
+    var prev = {};
+    safely_('rememberBattery_', function () {
+      prev = JSON.parse(props.getProperty('SWITCHBOT_BATTERY') || '{}');
+    });
+    for (var id in battery) {
+      if (Object.prototype.hasOwnProperty.call(battery, id)) prev[id] = battery[id];
+    }
+    props.setProperty('SWITCHBOT_BATTERY', JSON.stringify(prev));
+  });
+}
+
+/**
+ * 電池が心もとない機器の一覧を返す（自己点検から呼ぶ）。
+ * @param {number} [threshold] この割合以下を対象にする（既定20）
+ * @return {Array.<{name:string, percent:number, dead:boolean}>} 機器の配列
+ */
+function lowBatteryDevices_(threshold) {
+  var limit = threshold === undefined ? 20 : threshold;
+  var map = safely_('lowBatteryDevices_', function () {
+    return JSON.parse(PropertiesService.getScriptProperties().getProperty('SWITCHBOT_BATTERY') || '{}');
+  }, {}) || {};
+
+  var out = [];
+  findRows(SHEETS.DEVICE, function (r) { return isTrue_(r['有効']); }).forEach(function (d) {
+    var id = String(d['deviceId']);
+    if (map[id] === undefined) return;
+    var pct = Number(map[id]);
+    if (isNaN(pct) || pct > limit) return;
+    out.push({ name: String(d['deviceName']), percent: pct, dead: isDeadBattery_(pct) });
+  });
+  out.sort(function (a, b) { return a.percent - b.percent; });
+  return out;
 }
 
 /**
@@ -7684,10 +8020,38 @@ function switchbotSetupWebhook() {
  * @return {string} 現在の設定
  */
 function switchbotQueryWebhook() {
+  var proc = 'switchbotQueryWebhook';
   var res = switchbotFetch_('/webhook/queryWebhook', 'post', { action: 'queryUrl' });
-  var text = res ? JSON.stringify(res) : '取得できませんでした';
-  logInfo('switchbotQueryWebhook', text);
-  return text;
+  if (!res) {
+    logWarn(proc, '登録先を取得できませんでした（トークン・通信をご確認ください）');
+    return '登録先を取得できませんでした（トークン・通信をご確認ください）';
+  }
+
+  var urls = (res.urls || []).map(String);
+  var mine = webhookUrl_();
+  var match = mine && urls.some(function (u) { return u === mine; });
+
+  // 秘密キー（?k=）は台帳にも画面にも出さない。合っているかどうかだけを言う
+  var text = urls.length
+    ? '登録あり ' + urls.length + '件 / このAI Uriboと' + (match ? '一致しています' : '一致していません')
+    : 'まだ登録されていません';
+  logInfo(proc, text);
+
+  return text + '\n\n'
+    + (match
+      ? '登録は正しく入っています。それでも通知が届かないときは、SwitchBot側から見て\n'
+        + 'このURLに届いていない（GASが転送で応答するため）可能性があります。\n'
+        + 'その場合は薬箱の開閉を材料にできないので、服薬は質問でお答えいただく形になります。'
+      : 'メニュー「SwitchBotのWebhookを登録」を押すと登録し直せます。');
+}
+
+/**
+ * メニューからWebhookの登録先を確認する。
+ * @return {void}
+ */
+function menuQueryWebhook_() {
+  SpreadsheetApp.getUi().alert('SwitchBotのWebhook', switchbotQueryWebhook(),
+    SpreadsheetApp.getUi().ButtonSet.OK);
 }
 
 /**
@@ -8449,7 +8813,7 @@ function menuSelfTest_() {
 // ============================================================================
 
 /** この全部入りファイルに入っているはずの関数名 @type {Array.<string>} */
-var BUNDLE_FUNCTIONS = ["activeStaffByLineId_","addDays_","addMissingHeaders_","addUser","addUsersBulk","answerChoice_","apiFills_","apiPing_","apiUsers_","appendRow","applyCorrection_","archiveOldRows","archiveSheet_","askCorrection_","batchElapsedSec_","book_","buildDate_","buildMonthlyRows_","buildQuestion_","buildReviewText_","buildStatusText_","cancelSiblingTasks_","certaintyOf_","checkApiStep_","checkAskStep_","checkBatchesRan_","checkById_","checkConsistency","checkConsistencyBody_","checkDevices_","checkDriveStep_","checkLearning_","checkLineStep_","checkSecretsStep_","checkSecrets_","checkSetup","checkSheetSize_","checkSheetsStep_","checkSiteNames_","checkSlowBatch_","checkSourcesAlive_","checkStaffLinked_","checkStuckQueue_","checkTestMode_","checkTriggersStep_","checkTriggers_","checkWriteStep_","cleanupSelfTest_","clearSettingCache","countAutoConfirmed_","countAutoFilled_","countNeedsReview_","createAndSendSet","currentHour_","dailyBackup","dailyBackupBody_","dayOfWeek_","daysBetween_","decideStage_","deleteRowsWhere_","describeStatus_","describeWebhook_","detectDayRow_","detectGaps","detectHeader_","disablePhase2","dispatchPendingGaps_","displayName_","doGet","doPost","effectBySourceLines_","effectLines_","effectStats_","enablePhase2","ensureArchiveSheet_","ensureRestoreGuide_","ensureSheet_","escalationStaff_","excerptAround_","excludeAlreadyAsked_","expandChoices_","exportDiagnostics","fillNightStaffFromShift_","fillPlaceholders_","fillSourceOf_","findRow","findRows","findStaleGaps_","finishTurn_","flushQueue","forSiteOf_","formatMd_","getOrCreateFolder_","getSetting","getSettingNum","guessRole_","handleAlertFeedback_","handleAnswer_","handleApiGet_","handleEvent_","handleNote_","hoursBetween_","hoursSince_","importShiftText","includesReask_","ingestObservations_","ingestSwitchbotWebhook_","initSheets","installTriggers","invalidateCache_","isFirstDigestOfMonth_","isMonthEnd_","isNightKind_","isOfficeStaff_","isQuietHours_","isRehearsal_","isRestKind_","isSiteWord_","isTrue_","isUserCode_","issueRegistrationCode","jsonOut_","learnFromAnswer_","learnKey_","learnLabel_","learnObserve_","learnRow_","learnSpotCheckDue_","learnStage_","learnSummaryLines_","lineFetch_","lineToken_","listUsers","logError","logInfo","logStart","logWarn","makeRegistrationCode_","makeSecret_","markImported_","markReviewed_","matchStaffByName_","median_","menuAddUser_","menuAddUsersBulk_","menuCheckSetup_","menuDiagnostics_","menuEnablePhase2_","menuGoLive_","menuGoTest_","menuImportShift_","menuIssueCode_","menuListUsers_","menuMonthlyReport_","menuNightShift_","menuQuickStart_","menuRehearseShift_","menuRotateWebhookSecret_","menuSelfTest_","menuSetSecrets_","menuSetSwitchbot_","menuSetWebappUrl_","menuVerifyPaste_","monthDays_","monthlyReport","morningBatch","msgButtons_","msgQuickReply_","msgText_","needsPlanDetection_","nextGapId_","nextMonthStr_","nextSeqId_","nextUserCode_","nightBatch","nightBatchNow","nightSendPlan_","nightShiftReport_","nightShiftStaff_","nightStaffNameOf_","notifyContradictions_","nowStr_","offerCorrection_","onFollow_","onOpen","onPostback_","onTextBody_","onText_","padTwo_","parseHour_","parseMappedRow_","parseMatrixRow_","parsePositionalRow_","parseShiftDate_","parseShiftText_","pendingGaps_","previousMonth_","pushRaw_","quickStart","ratePct_","readTable","readTableFromSheet_","recentAnswers_","recordFill_","referenceLogText_","registerGaps","registerGapsBody_","rehearseShiftRequest","removeDefaultSheet_","reopenRecord_","replyRaw_","resolveAssignees_","resolveShiftSite_","retireUser","rotateBackups_","rotateWebhookSecret","ruleR01_","ruleR02_","ruleR04_","ruleR05_","runAutoFill","runAutoFillBody_","safely_","saveReport_","saveShift_","saveSummary_","scanAlerts_","seedChecks_","seedSettings_","seedStaff_","selfCheck","selfCheckBody_","selfTest","selfTestBody_","sendMonthlySummary_","sendNextInSet_","sendToEscalationStaff","sendToStaff","setDisplayName_","setSecrets","setSetting_","setSwitchbotSecrets","setTestMode","sheetToCsv_","sheet_","shiftResultText_","siteOfStaffToday_","siteOfTarget_","sourceSilentMessage_","splitCells_","staffById_","staffByLineId_","startBatchClock_","supersedeEstimate_","suspectSide_","switchbotFetch_","switchbotHeaders_","switchbotPoll","switchbotQueryWebhook","switchbotSetupWebhook","switchbotSyncDevices","toDateStr_","toDateTimeStr_","todayStr_","truncate_","tryRegisterByCode_","updateRow","validateSignature_","verifyApiKey_","verifyPaste","verifyRequest_","webhookUrl_","weeklyDigest","withLock_","withinBatchBudget_","writeAutoFill_","writeLog","writeMonthlySheet_"];
+var BUNDLE_FUNCTIONS = ["activeStaffByLineId_","addDays_","addMissingHeaders_","addUser","addUsersBulk","answerChoice_","apiFills_","apiPing_","apiUsers_","appendRow","applyCorrection_","archiveOldRows","archiveSheet_","askCorrection_","askPriority_","batchElapsedSec_","book_","buildDate_","buildMonthlyRows_","buildQuestion_","buildReviewText_","buildStatusText_","cancelSiblingTasks_","certaintyOf_","checkApiStep_","checkAskStep_","checkBatchesRan_","checkBattery_","checkById_","checkConsistency","checkConsistencyBody_","checkDevices_","checkDriveStep_","checkLearning_","checkLineStep_","checkSecretsStep_","checkSecrets_","checkSetup","checkSheetSize_","checkSheetsStep_","checkSiteNames_","checkSlowBatch_","checkSourcesAlive_","checkStaffLinked_","checkStuckQueue_","checkTestMode_","checkTriggersStep_","checkTriggers_","checkWebhookArriving_","checkWriteStep_","cleanupSelfTest_","clearSettingCache","countAutoConfirmed_","countAutoFilled_","countNeedsReview_","createAndSendSet","currentHour_","dailyBackup","dailyBackupBody_","dayOfWeek_","daysBetween_","decideStage_","deleteRowsWhere_","describeStatus_","describeWebhook_","detectDayRow_","detectGaps","detectHeader_","disablePhase2","dispatchPendingGaps_","displayName_","doGet","doPost","effectBySourceLines_","effectLines_","effectStats_","enablePhase2","ensureArchiveSheet_","ensureRestoreGuide_","ensureSheet_","escalationStaff_","excerptAround_","excludeAlreadyAsked_","expandChoices_","exportDiagnostics","fillNightStaffFromShift_","fillPlaceholders_","fillSourceOf_","findRow","findRows","findStaleGaps_","finishTurn_","flushQueue","forSiteOf_","formatMd_","getOrCreateFolder_","getSetting","getSettingNum","guessRole_","handleAlertFeedback_","handleAnswer_","handleApiGet_","handleEvent_","handleNote_","hoursBetween_","hoursSince_","importShiftText","includesReask_","ingestObservations_","ingestSwitchbotWebhook_","initSheets","installTriggers","invalidateCache_","isDeadBattery_","isFirstDigestOfMonth_","isMonthEnd_","isNightKind_","isOfficeStaff_","isQuietHours_","isRehearsal_","isRestKind_","isSiteWord_","isTrue_","isUserCode_","issueRegistrationCode","jsonOut_","lastPolledValue_","learnFromAnswer_","learnKey_","learnLabel_","learnObserve_","learnRow_","learnSpotCheckDue_","learnStage_","learnSummaryLines_","limitAsks_","lineFetch_","lineToken_","listUsers","logError","logInfo","logStart","logWarn","lowBatteryDevices_","makeRegistrationCode_","makeSecret_","markImported_","markReviewed_","matchStaffByName_","median_","menuAddUser_","menuAddUsersBulk_","menuCheckSetup_","menuDiagnostics_","menuDisablePhase2_","menuEnableAllSupport_","menuEnablePhase2_","menuGoLive_","menuGoTest_","menuImportShift_","menuIssueCode_","menuListUsers_","menuMonthlyReport_","menuNightShift_","menuQueryWebhook_","menuQuickStart_","menuRehearseShift_","menuRotateWebhookSecret_","menuSelfTest_","menuSetSecrets_","menuSetSwitchbot_","menuSetWebappUrl_","menuVerifyPaste_","monthDays_","monthlyReport","morningBatch","msgButtons_","msgQuickReply_","msgText_","needsPlanDetection_","nextGapId_","nextMonthStr_","nextSeqId_","nextUserCode_","nightBatch","nightBatchNow","nightSendPlan_","nightShiftReport_","nightShiftStaff_","nightStaffNameOf_","notifyContradictions_","nowStr_","offerCorrection_","onFollow_","onOpen","onPostback_","onTextBody_","onText_","padTwo_","parseHour_","parseMappedRow_","parseMatrixRow_","parsePositionalRow_","parseShiftDate_","parseShiftText_","pendingGaps_","previousMonth_","pushRaw_","quickStart","ratePct_","readTable","readTableFromSheet_","recentAnswers_","recordFill_","referenceLogText_","registerGaps","registerGapsBody_","rehearseShiftRequest","rememberBattery_","removeDefaultSheet_","reopenRecord_","replyRaw_","resolveAssignees_","resolveShiftSite_","retireUser","rotateBackups_","rotateWebhookSecret","ruleR01_","ruleR02_","ruleR04_","ruleR05_","runAutoFill","runAutoFillBody_","safely_","saveReport_","saveShift_","saveSummary_","scanAlerts_","seedChecks_","seedSettings_","seedStaff_","selfCheck","selfCheckBody_","selfTest","selfTestBody_","sendMonthlySummary_","sendNextInSet_","sendToEscalationStaff","sendToStaff","setDisplayName_","setSecrets","setSetting_","setSwitchbotSecrets","setTestMode","sheetToCsv_","sheet_","shiftResultText_","siteOfStaffToday_","siteOfTarget_","sourceSilentMessage_","splitCells_","staffById_","staffByLineId_","startBatchClock_","statusKeys_","supersedeEstimate_","suspectSide_","switchbotFetch_","switchbotHeaders_","switchbotPoll","switchbotQueryWebhook","switchbotSetupWebhook","switchbotSyncDevices","toDateStr_","toDateTimeStr_","todayStr_","truncate_","tryRegisterByCode_","updateRow","validateSignature_","verifyApiKey_","verifyPaste","verifyRequest_","webhookUrl_","weeklyDigest","withLock_","withinBatchBudget_","writeAutoFill_","writeLog","writeMonthlySheet_"];
 
 /** 収録ファイル数 @type {number} */
 var BUNDLE_FILE_COUNT = 25;

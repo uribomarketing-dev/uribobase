@@ -17,6 +17,10 @@ function createAndSendSet(staffId, gaps, title) {
   var proc = 'createAndSendSet';
   if (!gaps || !gaps.length) return { setId: '', count: 0, sent: false };
 
+  var all = gaps.length;
+  gaps = limitAsks_(gaps);
+  var deferred = all - gaps.length;
+
   var setId = nextSeqId_(SHEETS.TASK, 'セットid', 'SET', 5);
   gaps.forEach(function (g, i) {
     appendRow(SHEETS.TASK, {
@@ -31,10 +35,72 @@ function createAndSendSet(staffId, gaps, title) {
     });
   });
 
-  var intro = msgText_(title + '\n全' + gaps.length + '件です。ボタンで順番にお答えください。');
+  var intro = msgText_(title + '\n全' + gaps.length + '件です。ボタンで順番にお答えください。'
+    + (deferred ? '\n（ほか' + deferred + '件は明日以降にまわしました。一度にお願いしすぎないためです）' : ''));
   var result = sendNextInSet_(setId, null, [intro]);
-  logInfo(proc, staffId + ' へ ' + gaps.length + '件の確認セット（' + setId + '）を作成 / 送信=' + result);
-  return { setId: setId, count: gaps.length, sent: (result === SEND_RESULT.SENT) };
+  logInfo(proc, staffId + ' へ ' + gaps.length + '件の確認セット（' + setId + '）を作成 / 送信=' + result
+    + (deferred ? ' / 見送り' + deferred + '件' : ''));
+  return { setId: setId, count: gaps.length, sent: (result === SEND_RESULT.SENT), deferred: deferred };
+}
+
+/**
+ * 1回のセットで聞く件数を上限までに絞る。
+ *
+ * 【なぜ要るか】
+ * 利用者が4名、支援記録の項目が6つあると、それだけで1日24件になる。
+ * 24回ボタンを押させる仕組みは、たとえ正しくても使われなくなる。
+ * 上限を超えた分は捨てずに残し（S5の不足はそのまま）、翌日また対象になる。
+ *
+ * 絞る順番は「答えないと困る順」：優先度A → 古い日付 → 同じ利用者が続かないよう散らす。
+ * 同じ人の質問が固まると、その人が不在の日は全部「わからない」になりやすいため。
+ *
+ * @param {Array.<Object>} gaps S5の行オブジェクトの配列
+ * @return {Array.<Object>} 上限まで絞った配列
+ */
+function limitAsks_(gaps) {
+  var max = getSettingNum('max_asks_per_set', 8);
+  if (!(max > 0) || gaps.length <= max) return gaps;
+
+  var sorted = gaps.slice().sort(function (a, b) {
+    var pa = askPriority_(a);
+    var pb = askPriority_(b);
+    if (pa !== pb) return pa - pb;
+    var da = String(a['対象日'] || '');
+    var db = String(b['対象日'] || '');
+    if (da !== db) return da < db ? -1 : 1;
+    return 0;
+  });
+
+  // 同じ利用者が連続しないよう、利用者ごとに1件ずつ拾っていく
+  var byTarget = {};
+  var order = [];
+  sorted.forEach(function (g) {
+    var t = String(g['対象'] || '');
+    if (!byTarget[t]) { byTarget[t] = []; order.push(t); }
+    byTarget[t].push(g);
+  });
+
+  var picked = [];
+  while (picked.length < max) {
+    var addedThisRound = false;
+    for (var i = 0; i < order.length && picked.length < max; i++) {
+      var q = byTarget[order[i]];
+      if (q.length) { picked.push(q.shift()); addedThisRound = true; }
+    }
+    if (!addedThisRound) break;
+  }
+  return picked;
+}
+
+/**
+ * 不足の優先順位（小さいほど先に聞く）。
+ * @param {Object} gap S5の行
+ * @return {number} 0=優先度A / 1=優先度B / 2=それ以外
+ */
+function askPriority_(gap) {
+  var check = safely_('askPriority_', function () { return checkById_(gap['check_id']); }, null);
+  var p = check ? String(check['優先度']) : '';
+  return p === 'A' ? 0 : p === 'B' ? 1 : 2;
 }
 
 /**

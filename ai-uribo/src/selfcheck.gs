@@ -42,6 +42,8 @@ function selfCheckBody_(proc) {
   safely_(proc, function () { checkStuckQueue_(issues); });
   safely_(proc, function () { checkTestMode_(issues); });
   safely_(proc, function () { checkDevices_(issues); });
+  safely_(proc, function () { checkBattery_(issues); });
+  safely_(proc, function () { checkWebhookArriving_(issues); });
   safely_(proc, function () { checkSourcesAlive_(issues); });
   safely_(proc, function () { checkLearning_(issues); });
   safely_(proc, function () { checkSheetSize_(issues); });
@@ -212,6 +214,70 @@ function checkDevices_(issues) {
     issues.push('3日間なにも届いていない機器があります：'
       + silent.slice(0, 5).map(function (d) { return String(d['deviceName']); }).join('・')
       + '（電池切れ・置き場所の変更かもしれません）');
+  }
+}
+
+/** 変化した瞬間にWebhookで届くはずの用途種別 @type {Array.<string>} */
+var EVENT_DRIVEN_ROLES = ['服薬ボックス', '玄関', '居室ドア', '人感', '漏水'];
+
+/**
+ * 「開いた・動いた」の通知が一度も届いていないことに気づく。
+ *
+ * 【なぜ要るか】
+ * 開閉センサーは、状態を取りに行くだけでは役に立たない。1時間おきに見ても、
+ * その間に開けて閉めた薬箱は「閉じている」としか映らない。
+ * だから服薬の材料はWebhook（変化した瞬間の通知）だけが頼りになる。
+ *
+ * ところがWebhookは、届かなくてもどこにもエラーが出ない。
+ * 登録は「正常」と出たまま、質問だけが材料なしで届き続ける。
+ * 薬箱が毎日開くはずの日数ぶん沈黙していたら、それは静かな故障とみなす。
+ *
+ * @param {Array.<string>} issues 要対応の配列（追記される）
+ * @return {void}
+ */
+function checkWebhookArriving_(issues) {
+  var devices = findRows(SHEETS.DEVICE, function (r) {
+    return isTrue_(r['有効']) && EVENT_DRIVEN_ROLES.indexOf(String(r['用途種別'])) >= 0;
+  });
+  if (!devices.length) return;
+
+  var since = addDays_(todayStr_(), -2);
+  var arrived = findRows(SHEETS.LOG_IMPORT, function (r) {
+    return toDateStr_(r['発生日']) >= since
+      && String(r['取込元']).indexOf('switchbot-webhook:') === 0;
+  }).length;
+  if (arrived) return;
+
+  issues.push('SwitchBotの「開いた・動いた」通知が2日間ひとつも届いていません（対象'
+    + devices.length + '台）。薬箱の開閉はこの通知でしか分からないため、'
+    + '服薬の材料が入らないままになります。メニュー「SwitchBotのWebhookを確認」で登録先をご確認ください');
+}
+
+/**
+ * 電池が心もとない機器を朝にまとめて知らせる。
+ *
+ * 電池が尽きたセンサーは、エラーを出さずに古い値を返し続ける。
+ * その「動きなし」を材料にすると、記録が静かに歪む（switchbotPollでは除外している）。
+ * 除外している間は材料が減るだけなので、交換してもらうまでが一区切り。
+ *
+ * @param {Array.<string>} issues 要対応の配列（追記される）
+ * @return {void}
+ */
+function checkBattery_(issues) {
+  var low = lowBatteryDevices_(20);
+  if (!low.length) return;
+
+  var dead = low.filter(function (d) { return d.dead; });
+  if (dead.length) {
+    issues.push('電池が切れている機器があります：'
+      + dead.map(function (d) { return d.name + '（' + d.percent + '%）'; }).join('、')
+      + '。この機器の値は材料に使っていません（止まったセンサーの「動きなし」を'
+      + '「動きが無かった」と読み違えないためです）。電池を替えると自動で戻ります');
+  }
+  var soon = low.filter(function (d) { return !d.dead; });
+  if (soon.length) {
+    issues.push('電池が残りわずかな機器があります：'
+      + soon.map(function (d) { return d.name + '（' + d.percent + '%）'; }).join('、'));
   }
 }
 

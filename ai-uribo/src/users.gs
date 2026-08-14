@@ -117,7 +117,29 @@ function listUsers() {
  * 「動いていない」ように見えてしまうため、登録を確認してから有効化する。
  * @return {string} 実行結果のメッセージ
  */
-function enablePhase2() {
+/**
+ * まず始める5項目。
+ *
+ * 【なぜ全部いっぺんに始めないか】
+ * 優先度Aは11項目ある。利用者4名なら初日から44件の質問になり、
+ * 「1〜2分で終わる」どころではなくなる。答えきれない質問が毎日積み上がると、
+ * 仕組みそのものが使われなくなる。
+ *
+ * 選んだ基準は「あとから思い出して書けないもの」と「実費請求の根拠になるもの」。
+ * 慣れてきたらメニュー「質問を増やす」で残りを足せる。
+ * @type {Array.<string>}
+ */
+var SUPPORT_STARTER_CHECKS = ['CHK101', 'CHK105', 'CHK106', 'CHK204', 'CHK205'];
+
+/**
+ * 支援記録の質問（Phase2の優先度A）を開始する。
+ *
+ * 利用者が1人も登録されていないうちに開始すると、質問が作られないまま
+ * 「動いていない」ように見えてしまうため、登録を確認してから有効化する。
+ * @param {boolean} [all] trueなら優先度Aを全部。省略時はまず5項目だけ
+ * @return {string} 実行結果のメッセージ
+ */
+function enablePhase2(all) {
   var proc = 'enablePhase2';
   return withLock_(proc, 20000, function () {
     var users = findRows(SHEETS.USER, function (r) { return isTrue_(r['有効']); });
@@ -125,24 +147,41 @@ function enablePhase2() {
       return '利用者がまだ登録されていません。先にメニュー「利用者を登録する」から登録してください。';
     }
 
+    var starter = {};
+    SUPPORT_STARTER_CHECKS.forEach(function (id) { starter[id] = true; });
+
     var enabled = [];
     findRows(SHEETS.CHECK, function (r) {
       return String(r['優先度']) === 'A'
         && String(r['判定ルールID']) !== '-'
         && ['support', 'plan'].indexOf(String(r['対象種別'])) >= 0
-        && !isTrue_(r['有効']);
+        && !isTrue_(r['有効'])
+        && (all === true || starter[String(r['check_id'])]);
     }).forEach(function (c) {
       updateRow(SHEETS.CHECK, c._row, { '有効': true });
       enabled.push(String(c['check_id']) + ' ' + String(c['項目名']));
     });
     checkById_._map = null;
 
+    var rest = findRows(SHEETS.CHECK, function (r) {
+      return String(r['優先度']) === 'A'
+        && String(r['判定ルールID']) !== '-'
+        && ['support', 'plan'].indexOf(String(r['対象種別'])) >= 0
+        && !isTrue_(r['有効']);
+    }).length;
+
     var summary = enabled.length
       ? '支援記録の質問を開始しました（' + enabled.length + '項目）：\n・' + enabled.join('\n・')
       : '支援記録の質問はすでに開始しています。';
     logInfo(proc, summary.replace(/\n/g, ' / '));
-    return summary + '\n\n利用者' + users.length + '名が対象です。'
-      + '翌朝10:00の確認から質問が届きます（すぐ試すならメニュー「朝バッチを今すぐ実行」）。';
+
+    var perDay = enabled.length * users.length;
+    return summary + '\n\n利用者' + users.length + '名が対象です'
+      + (perDay ? '（1日あたり最大' + perDay + '件。'
+        + '1回にお送りするのは' + getSettingNum('max_asks_per_set', 8) + '件までで、残りは翌日にまわります）' : '')
+      + (rest ? '\n\nまだ始めていない項目が' + rest + 'あります。'
+        + '慣れてきたらメニュー「質問を増やす」で足してください。' : '')
+      + '\n\n翌朝10:00の確認から質問が届きます（すぐ試すならメニュー「朝バッチを今すぐ実行」）。';
   });
 }
 
@@ -197,9 +236,53 @@ function menuListUsers_() {
  */
 function menuEnablePhase2_() {
   var ui = SpreadsheetApp.getUi();
+  var users = findRows(SHEETS.USER, function (r) { return isTrue_(r['有効']); }).length;
   var res = ui.alert('支援記録の質問を開始しますか？',
-    listUsers() + '\n\nこの方々について、毎日の支援記録の確認（在否・食事・服薬など）が始まります。',
+    listUsers()
+    + '\n\nまず5項目（在否・食事提供・服薬・帰省予定・食事予定）から始めます。'
+    + '\nあとから思い出して書けないもの、実費請求の根拠になるものを選んでいます。'
+    + '\n\n1日あたり最大' + (users * 5) + '件。1回にお送りするのは'
+    + getSettingNum('max_asks_per_set', 8) + '件までです。'
+    + '\n多いと感じたらメニュー「支援記録の質問を止める」でいつでも静かにできます。',
     ui.ButtonSet.OK_CANCEL);
   if (res !== ui.Button.OK) return;
   ui.alert('支援記録の質問', enablePhase2(), ui.ButtonSet.OK);
+}
+
+/**
+ * メニューから支援記録の質問を止める。
+ * @return {void}
+ */
+function menuDisablePhase2_() {
+  var ui = SpreadsheetApp.getUi();
+  if (ui.alert('支援記録の質問を止めますか？',
+    '毎日の支援記録の確認を止めます。シフト希望の確認は続きます。\n'
+    + 'あとから「支援記録の質問を開始する」でいつでも再開できます。',
+    ui.ButtonSet.OK_CANCEL) !== ui.Button.OK) return;
+  ui.alert('支援記録の質問', disablePhase2(), ui.ButtonSet.OK);
+}
+
+/**
+ * メニューから残りの質問項目を足す。
+ * @return {void}
+ */
+function menuEnableAllSupport_() {
+  var ui = SpreadsheetApp.getUi();
+  var rest = findRows(SHEETS.CHECK, function (r) {
+    return String(r['優先度']) === 'A'
+      && String(r['判定ルールID']) !== '-'
+      && ['support', 'plan'].indexOf(String(r['対象種別'])) >= 0
+      && !isTrue_(r['有効']);
+  });
+  if (!rest.length) {
+    ui.alert('質問を増やす', '優先度Aの項目はすべて開始済みです。', ui.ButtonSet.OK);
+    return;
+  }
+  var res = ui.alert('質問を増やしますか？',
+    '次の' + rest.length + '項目を足します：\n・'
+    + rest.map(function (r) { return String(r['項目名']); }).join('\n・')
+    + '\n\n毎日の質問が増えます。よろしいですか？',
+    ui.ButtonSet.OK_CANCEL);
+  if (res !== ui.Button.OK) return;
+  ui.alert('質問を増やす', enablePhase2(true), ui.ButtonSet.OK);
 }
