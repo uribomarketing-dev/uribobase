@@ -1,0 +1,152 @@
+# =============================================================================
+# AI Uribo 連携（Home Assistant → AI Uribo）
+#
+# 置き場所：Home Assistant の config/packages/ai_uribo.yaml
+#   （packages を使っていない場合は configuration.yaml に下記を1行足す）
+#     homeassistant:
+#       packages: !include_dir_named packages
+#
+# 事前準備：config/secrets.yaml に1行追加する
+#     ai_uribo_url: "https://script.google.com/macros/s/＜デプロイID＞/exec?k=＜WEBHOOK_SECRET＞"
+#
+# 通信の向き：Home Assistant → インターネット → AI Uribo（GAS）への **送信だけ**。
+#   AI Uribo側から家のネットワークに入ることはないので、ルーターの設定変更は不要です。
+#
+# 重複について：同じ日・同じ対象・同じ項目は AI Uribo 側で1件しか記録されません。
+#   何度送られても記録は増えないので、送信回数を神経質に絞る必要はありません。
+# =============================================================================
+
+rest_command:
+  # AI Uribo に観察を1件送る共通コマンド
+  ai_uribo_observe:
+    url: !secret ai_uribo_url
+    method: POST
+    content_type: "application/json"
+    timeout: 20
+    payload: >-
+      {
+        "source": "home-assistant",
+        "observations": [
+          {
+            "date": "{{ date | default(now().strftime('%Y-%m-%d')) }}",
+            "target": "{{ target }}",
+            "item": "{{ item }}",
+            "value": "{{ value }}"
+          }
+        ]
+      }
+
+automation:
+  # ---------------------------------------------------------------------------
+  # 1. 食事の時間帯にキッチンで人を検知 → 食事提供の材料にする
+  #    entity_id は実際の名前に置き換えてください（開発者ツール → 状態 で確認できます）
+  #    Frigateの人物センサーは binary_sensor.<カメラ名>_person という名前が多いです
+  # ---------------------------------------------------------------------------
+  - alias: "AI Uribo：キッチンの人検知（食事の時間帯）"
+    id: ai_uribo_kitchen_meal
+    mode: single
+    max_exceeded: silent
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.kitchen_person   # ★要変更
+        from: "off"
+        to: "on"
+        for: "00:00:10"                           # 一瞬の誤検知を拾わない
+    condition:
+      - condition: or
+        conditions:
+          - condition: time
+            after: "06:00:00"
+            before: "09:30:00"
+          - condition: time
+            after: "17:00:00"
+            before: "20:30:00"
+    action:
+      - service: rest_command.ai_uribo_observe
+        data:
+          target: "ALL"
+          item: "食事提供"
+          value: "キッチンで人を検知（{{ now().strftime('%H:%M') }}／Frigate）"
+
+  # ---------------------------------------------------------------------------
+  # 2. 夜間（22時〜5時）に人を検知 → 夜間の動きとして残す
+  #    夜勤の巡回記録の裏付けになります（巡回そのものの記録は人が答えます）
+  # ---------------------------------------------------------------------------
+  - alias: "AI Uribo：夜間の人検知"
+    id: ai_uribo_night_motion
+    mode: single
+    max_exceeded: silent
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.kitchen_person   # ★要変更（居室・廊下のカメラがあればそちら）
+        from: "off"
+        to: "on"
+        for: "00:00:10"
+    condition:
+      - condition: time
+        after: "22:00:00"
+        before: "05:00:00"
+    action:
+      - service: rest_command.ai_uribo_observe
+        data:
+          target: "ALL"
+          item: "夜間の動き"
+          value: "夜間に人を検知（{{ now().strftime('%H:%M') }}／Frigate）"
+
+  # ---------------------------------------------------------------------------
+  # 3. 玄関の開閉（SwitchBot開閉センサーがHAに入っていれば）→ 外出・帰宅
+  # ---------------------------------------------------------------------------
+  - alias: "AI Uribo：玄関の開閉"
+    id: ai_uribo_entrance
+    mode: single
+    max_exceeded: silent
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.entrance_door    # ★要変更
+        to: "on"
+    action:
+      - service: rest_command.ai_uribo_observe
+        data:
+          target: "ALL"
+          item: "外出・帰宅時間"
+          value: "玄関の開閉を検知（{{ now().strftime('%H:%M') }}）"
+
+  # ---------------------------------------------------------------------------
+  # 4. 【上級・任意】Frigateのイベントを MQTT で直接受ける版
+  #    Frigateは frigate/events に検知イベントを流します。
+  #    ゾーン（zones）を設定していれば「どこで」まで分かります。
+  #    上の1〜3が動いていれば、こちらは無くても構いません。
+  # ---------------------------------------------------------------------------
+  # - alias: "AI Uribo：Frigateイベント（MQTT）"
+  #   id: ai_uribo_frigate_mqtt
+  #   mode: queued
+  #   max: 10
+  #   trigger:
+  #     - platform: mqtt
+  #       topic: "frigate/events"
+  #   condition:
+  #     - condition: template
+  #       value_template: >-
+  #         {{ trigger.payload_json.type == 'new'
+  #            and trigger.payload_json.after.label == 'person' }}
+  #   action:
+  #     - service: rest_command.ai_uribo_observe
+  #       data:
+  #         target: "ALL"
+  #         item: "在否確認"
+  #         value: >-
+  #           {{ trigger.payload_json.after.camera }} で人を検知
+  #           （{{ now().strftime('%H:%M') }}／ゾーン：
+  #           {{ trigger.payload_json.after.entered_zones | join('・') or '未設定' }}）
+
+# =============================================================================
+# 動作確認のしかた
+#   1. 開発者ツール → サービス → 「rest_command.ai_uribo_observe」を選ぶ
+#   2. YAMLモードにして下を貼り、実行
+#        data:
+#          target: "ALL"
+#          item: "食事提供"
+#          value: "テスト送信"
+#   3. AI Uribo の台帳 S4_実績ログ取込 に raw_home-assistant の行が増えれば成功
+#      （LINEで「精査」と送っても確認できます）
+# =============================================================================

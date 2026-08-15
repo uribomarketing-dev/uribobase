@@ -1,0 +1,290 @@
+# =============================================================================
+# AI Uribo × AIハブ（Home Assistant 設定）
+#
+# 置き場所： /config/packages/ai_uribo.yaml
+#            configuration.yaml に次の3行が無ければ足す：
+#              homeassistant:
+#                packages: !include_dir_named packages
+#
+# 秘密情報は /config/secrets.yaml に置く（このファイルには書かない）：
+#   ai_uribo_url: "https://script.google.com/macros/s/＜デプロイID＞/exec?k=＜WEBHOOK_SECRET＞"
+#
+# 何をするか：
+#   Frigate（ローカル・無料）が共用部で人を検出したら、その「時刻つきの事実」だけを
+#   AI Uribo に送る。誰の記録にするかは決めない。翌朝の質問に「（参考）」として
+#   添えられ、夜勤者が1タップで確定させる。
+#
+#   画像・映像は一切送らない。送るのは言葉と時刻だけ。
+#
+# 【MQTTではなくREST（APIを読みに行く形）にしている理由】
+#   2026-08-13の実機確認で、玉里のHome Assistantには MQTT も Frigate 統合も
+#   入っていなかった。一方 http://192.168.1.13:5000/api/version は
+#   0.16.0-c2f8de9 を返した＝**FrigateのAPIは生きている**。
+#   そこで、統合を足さずに済む「APIを定期的に読む」方式にした。
+#   将来MQTTを入れたら、ファイル末尾の案内どおり差し替えると即時になる。
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# 記録の保存期間を短くする。
+# AIハブのHome AssistantはmicroSDにデータベースを書く。玉里のカードは空きが
+# 1.26GBしかないため、既定（10日ぶん・全部）のままだと数週間で埋まり、
+# 書けなくなって見守りが黙って止まる。
+# AI Uriboに必要なのは「その日のできごと」だけなので、3日で十分。
+# -----------------------------------------------------------------------------
+recorder:
+  purge_keep_days: 3
+  commit_interval: 30
+  exclude:
+    domains:
+      - automation
+      - updater
+      - sun
+    entity_globs:
+      - sensor.*_uptime
+      - sensor.*_cpu*
+      - sensor.*_memory*
+
+# -----------------------------------------------------------------------------
+# Frigateの「いちばん新しい人の検出」を5分ごとに読む。
+# 検出が無ければ none のまま。新しい検出が入ると id が変わり、それが合図になる。
+# entity_id は sensor.ai_uribo_frigate_last_person になる（nameを英語にしてある）
+# -----------------------------------------------------------------------------
+sensor:
+  - platform: rest
+    name: ai_uribo_frigate_last_person
+    unique_id: ai_uribo_frigate_last_person
+    resource: "http://192.168.1.13:5000/api/events?label=person&limit=1"
+    scan_interval: 300
+    timeout: 15
+    # 状態そのものに「検出時刻|カメラ名」を入れる。
+    # json_attributes_path で配列の先頭を指す書き方は環境によって黙って失敗するため、
+    # 属性に頼らず、状態1本で必要な情報を運ぶ（新しい検出が入れば時刻が変わる＝合図になる）
+    # {%- -%} で余白を落とす。落とさないと状態が「\n  1786611974|B0E9FE...\n  」のように
+    # 前後に空白と改行を含み、カメラ名の読み替え（下の template）が一致せず、
+    # 記録にMACアドレスがそのまま出てしまう。エラーにはならないので気づけない
+    value_template: >-
+      {%- if value_json | count > 0 -%}
+      {{ value_json[0].start_time | int }}|{{ value_json[0].camera }}
+      {%- else -%}none{%- endif -%}
+
+# -----------------------------------------------------------------------------
+# カメラ名の読み替え。
+# FrigateはカメラをMACアドレス（例 B0E9FE038DFB）で持っている。
+# そのまま記録に入れると現場が読めないので、人が分かる名前に直す。
+# カメラを増やしたら、ここに1行足すだけでよい。
+# -----------------------------------------------------------------------------
+template:
+  - sensor:
+      - name: ai_uribo_frigate_camera_label
+        unique_id: ai_uribo_frigate_camera_label
+        state: >-
+          {% set names = {
+               'B0E9FE038DFB': '玉里キッチン'
+             } %}
+          {% set st = states('sensor.ai_uribo_frigate_last_person') | trim %}
+          {% set c = st.split('|')[1] | trim if '|' in st else '' %}
+          {{ names.get(c, c if c else '不明') }}
+
+rest_command:
+  ai_uribo_observe:
+    url: !secret ai_uribo_url
+    method: POST
+    content_type: "application/json"
+    timeout: 20
+    payload: >-
+      {"source":"frigate","observations":[{
+        "date":"{{ date }}",
+        "target":"{{ target | default('ALL') }}",
+        "item":"{{ item }}",
+        "value":"{{ value }}"
+      }]}
+
+# -----------------------------------------------------------------------------
+# 連投を防ぐタイマー。
+# 人が1回通っただけでFrigateは何件もイベントを出す。
+# 記録として意味があるのは「何時ごろ動きがあったか」なので、夜は30分に1件でよい。
+# -----------------------------------------------------------------------------
+timer:
+  ai_uribo_night_cooldown:
+    name: AI Uribo 夜間検知クールダウン
+    duration: "00:30:00"
+  ai_uribo_day_cooldown:
+    name: AI Uribo 日中検知クールダウン
+    duration: "12:00:00"
+  ai_uribo_meal_cooldown:
+    name: AI Uribo 食事時間帯クールダウン
+    duration: "01:30:00"
+
+automation:
+  # ---------------------------------------------------------------------------
+  # ① 夜間（22:00〜5:00）に共用部で人を検出したら、時刻を記録する
+  #    → 翌朝の「夜間巡回・就寝確認」の質問に（参考）として付く
+  #
+  #    時刻は now() ではなく、Frigateが記録した検出時刻（start_time）を使う。
+  #    5分おきに読む方式なので、now()だと最大5分ずれるため。
+  # ---------------------------------------------------------------------------
+  - id: ai_uribo_night_motion
+    alias: "AI Uribo：夜間の共用部の動きを記録"
+    mode: single
+    triggers:
+      - trigger: state
+        entity_id: sensor.ai_uribo_frigate_last_person
+    conditions:
+      # 検出が無い状態・再起動直後は送らない
+      - condition: template
+        value_template: >-
+          {{ '|' in trigger.to_state.state }}
+      # 検出された時刻が夜間か（いまの時刻ではなく、検出の時刻で判断する）
+      - condition: template
+        value_template: >-
+          {% set h = (trigger.to_state.state | trim).split('|')[0]
+                     | float | timestamp_custom('%H', true) | int %}
+          {{ h >= 22 or h < 5 }}
+      # 30分以内に既に送っていれば送らない
+      - condition: state
+        entity_id: timer.ai_uribo_night_cooldown
+        state: "idle"
+    actions:
+      - action: timer.start
+        target:
+          entity_id: timer.ai_uribo_night_cooldown
+      - variables:
+          ts: "{{ (trigger.to_state.state | trim).split('|')[0] | float }}"
+          cam: "{{ states('sensor.ai_uribo_frigate_camera_label') }}"
+          # 拠点あてで送る。ALLのままだと、清水にもハブを入れたときに
+          # 玉里の動きが清水の質問に添えられてしまう（拠点をまたいだ誤配）
+          site: "うりぼベース玉里"
+      - action: rest_command.ai_uribo_observe
+        data:
+          # 深夜0〜5時の検知は「前の晩」の記録にする（夜勤は日付をまたぐため）
+          date: "{{ (ts - 18000) | timestamp_custom('%Y-%m-%d', true) }}"
+          target: "{{ site }}"
+          item: "夜間の動き"
+          value: >-
+            共用部で動きあり {{ ts | timestamp_custom('%H:%M', true) }}（{{ cam }}）
+
+  # ---------------------------------------------------------------------------
+  # ② 日中、その日はじめて共用部で人を検出したら記録する（在否確認の材料）
+  # ---------------------------------------------------------------------------
+  - id: ai_uribo_daytime_presence
+    alias: "AI Uribo：日中の在室を記録（1日1回）"
+    mode: single
+    triggers:
+      - trigger: state
+        entity_id: sensor.ai_uribo_frigate_last_person
+    conditions:
+      - condition: template
+        value_template: >-
+          {{ '|' in trigger.to_state.state }}
+      - condition: template
+        value_template: >-
+          {% set h = (trigger.to_state.state | trim).split('|')[0]
+                     | float | timestamp_custom('%H', true) | int %}
+          {{ h >= 5 and h < 22 }}
+      - condition: state
+        entity_id: timer.ai_uribo_day_cooldown
+        state: "idle"
+    actions:
+      - action: timer.start
+        target:
+          entity_id: timer.ai_uribo_day_cooldown
+      - variables:
+          ts: "{{ (trigger.to_state.state | trim).split('|')[0] | float }}"
+          cam: "{{ states('sensor.ai_uribo_frigate_camera_label') }}"
+          # 拠点あてで送る。ALLのままだと、清水にもハブを入れたときに
+          # 玉里の動きが清水の質問に添えられてしまう（拠点をまたいだ誤配）
+          site: "うりぼベース玉里"
+      - action: rest_command.ai_uribo_observe
+        data:
+          date: "{{ ts | timestamp_custom('%Y-%m-%d', true) }}"
+          target: "{{ site }}"
+          item: "共用部の動き"
+          value: >-
+            日中に在室を確認 {{ ts | timestamp_custom('%H:%M', true) }}（{{ cam }}）
+
+  # ---------------------------------------------------------------------------
+  # ③ 食事の時間帯に、食卓のあたりで人を検知したら記録する（無料・AI+不要）
+  #
+  #    実機のFrigateは dining table / chair / bowl / microwave / refrigerator を
+  #    検出できている＝この画角は食卓と台所を捉えている。
+  #    ただし「配膳した」と言い切れるのはAI+のVLMだけなので、
+  #    ここで残すのは **時刻つきの事実（人が食卓のあたりに居た）** に留める。
+  #    それが「食事提供」の質問に（参考）として添えられ、人が確定させる。
+  # ---------------------------------------------------------------------------
+  - id: ai_uribo_meal_window_presence
+    alias: "AI Uribo：食事の時間帯の動きを記録"
+    mode: single
+    triggers:
+      - trigger: state
+        entity_id: sensor.ai_uribo_frigate_last_person
+    conditions:
+      - condition: template
+        value_template: >-
+          {{ '|' in trigger.to_state.state }}
+      # 朝 6:00-8:29 ／ 昼 11:00-13:29 ／ 夕 17:00-19:29
+      - condition: template
+        value_template: >-
+          {% set h = (trigger.to_state.state | trim).split('|')[0]
+                     | float | timestamp_custom('%H', true) | int %}
+          {{ (h >= 6 and h < 9) or (h >= 11 and h < 14) or (h >= 17 and h < 20) }}
+      - condition: state
+        entity_id: timer.ai_uribo_meal_cooldown
+        state: "idle"
+    actions:
+      - action: timer.start
+        target:
+          entity_id: timer.ai_uribo_meal_cooldown
+      - variables:
+          ts: "{{ (trigger.to_state.state | trim).split('|')[0] | float }}"
+          cam: "{{ states('sensor.ai_uribo_frigate_camera_label') }}"
+          # 拠点あてで送る。ALLのままだと、清水にもハブを入れたときに
+          # 玉里の動きが清水の質問に添えられてしまう（拠点をまたいだ誤配）
+          site: "うりぼベース玉里"
+          meal: >-
+            {% set h = (trigger.to_state.state | trim).split('|')[0]
+                       | float | timestamp_custom('%H', true) | int %}
+            {{ '朝食' if h < 9 else ('昼食' if h < 14 else '夕食') }}
+      - action: rest_command.ai_uribo_observe
+        data:
+          date: "{{ ts | timestamp_custom('%Y-%m-%d', true) }}"
+          target: "{{ site }}"
+          item: "食事時間帯の動き"
+          value: >-
+            {{ meal }}の時間帯に食卓のあたりで動きあり {{ ts | timestamp_custom('%H:%M', true) }}（{{ cam }}）
+
+  # ---------------------------------------------------------------------------
+  # ④ AI+のシーン検知を受ける枠（例：配膳）
+  #    ※ AI+の検知がHome Assistantに来るかは未確認。
+  #      有効にするには entity_id を実機の名前に直して、コメントを外す
+  # ---------------------------------------------------------------------------
+  # - id: ai_uribo_meal_served
+  #   alias: "AI Uribo：配膳を検知したら記録"
+  #   mode: single
+  #   triggers:
+  #     - trigger: state
+  #       entity_id: binary_sensor.＜AI+のシーンに対応するエンティティ＞
+  #       to: "on"
+  #   actions:
+  #     - action: rest_command.ai_uribo_observe
+  #       data:
+  #         date: "{{ now().strftime('%Y-%m-%d') }}"
+  #         target: "ALL"
+  #         item: "食事提供"
+  #         value: "配膳している様子 {{ now().strftime('%H:%M') }}（AIハブ・キッチンカメラ／要精査）"
+
+# =============================================================================
+# 【将来】MQTTを入れたときの即時版（いまは使わない）
+#
+# 設定 → デバイスとサービス → 追加 → MQTT が入り、frigate/events が流れるように
+# なったら、上の automation の triggers を次に差し替えると、
+# 5分待たずにその場で飛ぶようになる。
+#
+#   triggers:
+#     - trigger: mqtt
+#       topic: "frigate/events"
+#   conditions:
+#     - condition: template
+#       value_template: >-
+#         {{ trigger.payload_json.type == 'new'
+#            and trigger.payload_json.after.label == 'person' }}
+# =============================================================================
