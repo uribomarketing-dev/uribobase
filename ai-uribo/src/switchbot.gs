@@ -153,25 +153,38 @@ function guessRole_(deviceType, deviceName) {
  */
 function switchbotPoll() {
   var proc = 'switchbotPoll';
-  return withLock_(proc, 120000, function () {
-    logStart(proc);
-    var devices = findRows(SHEETS.DEVICE, function (r) {
-      return isTrue_(r['有効']) && String(r['用途種別'] || '').trim();
-    });
-    if (!devices.length) {
-      logInfo(proc, '有効な機器がありません（S12_機器マスタをご確認ください）');
-      return '対象機器なし';
-    }
+  logStart(proc);
+  var devices = findRows(SHEETS.DEVICE, function (r) {
+    return isTrue_(r['有効']) && String(r['用途種別'] || '').trim();
+  });
+  if (!devices.length) {
+    logInfo(proc, '有効な機器がありません（S12_機器マスタをご確認ください）');
+    return '対象機器なし';
+  }
 
+  // 機器への問い合わせは鍵を持たずに済ませる。
+  // ここで鍵を握ったまま6台ぶん通信すると、その間に届いた薬箱の開閉が
+  // 「他の処理が実行中」で捨てられる（実際に8/14・8/15に取りこぼしていた）。
+  var fetched = devices.map(function (d) {
+    return {
+      dev: d,
+      st: safely_(proc + ':' + d['deviceName'], function () {
+        return switchbotFetch_('/devices/' + encodeURIComponent(String(d['deviceId'])) + '/status');
+      }, null)
+    };
+  });
+
+  return withLock_(proc, 60000, function () {
     var date = todayStr_();
     var written = 0;
     var skippedDead = [];
     var unreadable = [];
     var battery = {};
 
-    devices.forEach(function (d) {
+    fetched.forEach(function (f) {
+      var d = f.dev;
+      var st = f.st;
       safely_(proc + ':' + d['deviceName'], function () {
-        var st = switchbotFetch_('/devices/' + encodeURIComponent(String(d['deviceId'])) + '/status');
         if (!st) { unreadable.push(String(d['deviceName']) + '（応答なし）'); return; }
         var role = SWITCHBOT_ROLES[String(d['用途種別'])];
         if (!role) return;
@@ -426,7 +439,7 @@ function ingestSwitchbotWebhook_(body) {
   var mac = String(ctx.deviceMac || '');
   if (!mac) return 0;
 
-  return withLock_(proc, 30000, function () {
+  return withLock_(proc, 60000, function () {
     // deviceMac から機器を探す（S12でMACを埋めていない場合は deviceId でも照合）
     var dev = findRow(SHEETS.DEVICE, function (r) {
       var m = String(r['deviceMac'] || '').replace(/:/g, '').toUpperCase();
@@ -455,15 +468,27 @@ function ingestSwitchbotWebhook_(body) {
     // 「その晩どうだったか」を見たときに抜けて見える（夜勤の記録がいちばん問われるところ）
     var eventDate = (hour < 5) ? addDays_(todayStr_(), -1) : todayStr_();
 
+    var srcId = 'switchbot-webhook:' + String(dev['deviceId']);
+    var value = describeWebhook_(ctx) + '（' + Utilities.formatDate(new Date(), TZ, 'HH:mm')
+      + (hour < 5 ? '・翌' + Utilities.formatDate(new Date(), TZ, 'M/d') + '未明' : '') + '）';
+
+    // 同じ通知が二重に入るのを防ぐ。
+    // GASはPOSTに転送で応答するため、SwitchBot側が「届かなかった」と見て
+    // もう一度送ってくることがある（実際に「開閉：open（10:55）」が2行入っていた）。
+    // 同じ機器・同じ分・同じ内容なら、それは同じ出来事とみなす。
+    if (sameWebhookExists_(srcId, eventDate, value)) {
+      logInfo(proc, String(dev['deviceName']) + ' の通知は同じものが既にあるため記録しません');
+      return 0;
+    }
+
     appendRow(SHEETS.LOG_IMPORT, {
       'log_id': nextSeqId_(SHEETS.LOG_IMPORT, 'log_id', 'LOG', 6),
       '発生日': eventDate,
       '対象種別': role.種別,
       '対象': String(dev['対象user_code'] || dev['拠点'] || 'ALL'),
       '項目名': itemName,
-      '値': describeWebhook_(ctx) + '（' + Utilities.formatDate(new Date(), TZ, 'HH:mm')
-        + (hour < 5 ? '・翌' + Utilities.formatDate(new Date(), TZ, 'M/d') + '未明' : '') + '）',
-      '取込元': 'switchbot-webhook:' + String(dev['deviceId']),
+      '値': value,
+      '取込元': srcId,
       '取込日時': nowStr_()
     });
     logInfo(proc, String(dev['deviceName']) + ' の通知を記録');
@@ -475,6 +500,21 @@ function ingestSwitchbotWebhook_(body) {
     }
     return 1;
   }, function () { return 0; });
+}
+
+/**
+ * 同じ通知が既にS4に入っているか。
+ * @param {string} srcId 取込元（switchbot-webhook:deviceId）
+ * @param {string} date 発生日 YYYY-MM-DD
+ * @param {string} value 値
+ * @return {boolean} 既にあればtrue
+ */
+function sameWebhookExists_(srcId, date, value) {
+  return findRows(SHEETS.LOG_IMPORT, function (r) {
+    return String(r['取込元']) === srcId
+      && toDateStr_(r['発生日']) === date
+      && String(r['値']) === value;
+  }).length > 0;
 }
 
 /**

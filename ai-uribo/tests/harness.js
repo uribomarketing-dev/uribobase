@@ -1733,6 +1733,11 @@ run(`(function(){
   var u = findRow(SHEETS.USER,{'user_code':'TEST01'});
   updateRow(SHEETS.USER,u._row,{'有効':true,'拠点':'清水','服薬自動':true});
   var c = checkById_('CHK106'); updateRow(SHEETS.CHECK,c._row,{'有効':true}); checkById_._map=null;
+  // 前のテストが同じ機器で入れた通知を片付ける
+  // （実機では二重通知を弾くのが正しいが、ここは別の出来事として見たい）
+  deleteRowsWhere_(SHEETS.LOG_IMPORT, function(r){
+    return String(r['取込元']) === 'switchbot-webhook:DEV2';
+  });
 })()`);
 
 // ① SwitchBotから「箱が開いた」が届く
@@ -2179,6 +2184,24 @@ run(`(function(){
 check('届いていれば知らせない',
   run(`(function(){ var a=[]; checkWebhookArriving_(a); return a; })()`).length === 0);
 
+// 同じ通知が二重に入らない（GASの転送応答でSwitchBotが送り直すことがある）
+run(`(function(){
+  if (!findRow(SHEETS.DEVICE,{'deviceId':'ZZDUP'})) {
+    appendRow(SHEETS.DEVICE,{deviceId:'ZZDUP', deviceName:'試験_二重', deviceType:'Contact Sensor',
+      deviceMac:'ZZDUP', 拠点:'清水', 対象user_code:'', 用途種別:'服薬ボックス', 有効:true});
+  }
+})()`);
+const dupHook = { eventType: 'changeReport', eventVersion: '1',
+  context: { deviceType: 'WoContact', deviceMac: 'ZZDUP', openState: 'open', battery: 100 } };
+const dupBefore = rows('LOG_IMPORT').length;
+run(`ingestSwitchbotWebhook_(${JSON.stringify(dupHook)})`);
+check('1回目は記録する', rows('LOG_IMPORT').length === dupBefore + 1);
+run(`ingestSwitchbotWebhook_(${JSON.stringify(dupHook)})`);
+check('同じ通知がもう一度来ても二重に入らない',
+  rows('LOG_IMPORT').length === dupBefore + 1, rows('LOG_IMPORT').length - dupBefore);
+check('二重になった理由を実行ログに残す',
+  rows('RUN_LOG').some(r => String(r.詳細).indexOf('同じものが既にあるため') > 0));
+
 // 届くかどうかを、その場で白黒つけられる（推測で語らずに済ませるため）
 // 実機では数分の間があくが、テストは1分以内に走りきるので、
 // 前のテストが残した同じ分の警告を先に片付けておく
@@ -2239,6 +2262,53 @@ check('もう一度押しても二重にならない',
   String(run('enablePhase2(true)')).indexOf('すでに開始しています') > 0);
 run('disablePhase2()');
 check('多すぎたらいつでも静かにできる', onNow().length === 0, onNow());
+
+console.log('\n=== T39 夜勤メニューのボタンを受ける ===');
+// LINEに配られた「夜勤メニュー」は、押すと「ふりかえり」などの言葉を送ってくるだけ。
+// 受ける口が無いと、どのボタンを押しても「ボタンでお答えください」としか返らない
+const menuReply = (word, uid) => {
+  replies.length = 0;
+  run(`onText_(${JSON.stringify(uid || 'U_FUJI')}, ${JSON.stringify(word)}, 'RT_MENU')`);
+  return JSON.stringify(replies);
+};
+// 受けられなかったときに返る言葉（これが返ったら、そのボタンは死んでいる）
+const NOT_HANDLED = '困ったら';
+check('「ふりかえり」を受ける（想定外のテキスト扱いにしない）',
+  menuReply('ふりかえり').indexOf(NOT_HANDLED) < 0, menuReply('ふりかえり'));
+check('「食事」も受ける', menuReply('食事').indexOf(NOT_HANDLED) < 0);
+check('「予定」も受ける', menuReply('予定').indexOf(NOT_HANDLED) < 0);
+check('「シフト希望」も受ける', menuReply('シフト希望').indexOf(NOT_HANDLED) < 0);
+check('メニューに無い言葉は今までどおり案内する',
+  menuReply('ほげほげ').indexOf(NOT_HANDLED) > 0);
+
+// お尋ねすることが無いときに、なぜ無いのかまで返す（壊れているのか正常なのか分かるように）
+run(`(function(){
+  findRows(SHEETS.CHECK, function(r){
+    return ['support','plan'].indexOf(String(r['対象種別'])) >= 0;
+  }).forEach(function(c){ updateRow(SHEETS.CHECK, c._row, {'有効': false}); });
+  checkById_._map = null;
+  // これまでのテストで積んだ不足を片付けて、「まだ始まっていない」状態を作る
+  findRows(SHEETS.GAP).forEach(function(g){
+    updateRow(SHEETS.GAP, g._row, {'状態': GAP_STATUS.DONE});
+  });
+})()`);
+const emptySupport = menuReply('支援記録');
+check('質問が始まっていないときは、その理由を返す',
+  emptySupport.indexOf('まだ始まっていません') > 0, emptySupport.substring(0, 200));
+check('どうすれば始まるかまで書いてある',
+  emptySupport.indexOf('支援記録の質問を開始する') > 0);
+
+// 質問が出せる状態なら、その場で聞き直して送る（朝10時を待たない）
+run('enablePhase2()');
+const withItems = menuReply('ふりかえり');
+check('押したその場で不足を洗い直して質問を出す',
+  withItems.indexOf('件あります') > 0, withItems.substring(0, 200));
+check('拠点の違う利用者の質問は混ざらない',
+  run(`(function(){
+    var s = findRow(SHEETS.STAFF,{'staff_id':'STF002'});
+    return String(s['拠点']);
+  })()`) === '清水');
+run('disablePhase2()');
 
 console.log('\n=== T18 GAS貼り付け用の全部入りファイル ===');
 // 1万行のコピーは静かに切れる。切れたまま動くのがいちばん厄介なので、

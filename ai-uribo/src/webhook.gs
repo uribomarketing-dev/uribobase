@@ -436,6 +436,9 @@ function onTextBody_(staff, userId, text, replyToken, proc) {
     // 回答への一言追記
     if (handleNote_(staff, text, replyToken)) return;
 
+    // 夜勤メニュー（リッチメニュー）のボタン
+    if (handleMenuWord_(staff, text, replyToken, proc)) return;
+
     switch (text) {
       case '状況': replyRaw_(replyToken, [msgText_(buildStatusText_(staff))]); return;
       case 'ヘルプ': replyRaw_(replyToken, [msgText_(HELP_TEXT_)]); return;
