@@ -2310,6 +2310,41 @@ check('拠点の違う利用者の質問は混ざらない',
   })()`) === '清水');
 run('disablePhase2()');
 
+console.log('\n=== T40 はじめの設定をもう一度実行しても、本番を止めない ===');
+// 2026-09-21、本番運用中に「はじめの設定（quickStart）」をもう一度実行したところ、
+// 無条件にテストモードへ戻され、本番のLINE送信が止まっていたことに気づかないまま
+// 半日ほど過ぎていた。もう一度起こしてはいけない事故なので、再現して固定する。
+run(`(function(){
+  var r=findRow(SHEETS.SETTING,{'キー':'test_mode'});updateRow(SHEETS.SETTING,r._row,{'値':'FALSE'});
+  clearSettingCache();
+})()`);
+check('本番稼働中（LINE登録済みのスタッフがいる）', run(`findRows(SHEETS.STAFF, function(r){
+  return isTrue_(r['有効']) && String(r['line_user_id']||'').trim();
+}).length`) > 0);
+const requickStart = String(run('quickStart()'));
+check('LINE登録済みのスタッフがいれば、テストモードに触らない',
+  run(`getSetting('test_mode','FALSE')`) === 'FALSE');
+check('触らなかったことと、いまの状態を言葉で返す',
+  requickStart.indexOf('テストモードの設定はそのままにしました') > 0
+    && requickStart.indexOf('現在: FALSE') > 0,
+  requickStart.substring(0, 400));
+
+// 新規セットアップ（まだ誰もLINE登録していない）では、これまでどおり安全側に倒す
+run(`(function(){
+  findRows(SHEETS.STAFF).forEach(function(s){ updateRow(SHEETS.STAFF,s._row,{'line_user_id':''}); });
+})()`);
+run('quickStart()');
+check('誰もLINE登録していなければ、これまでどおりテストモードで始める',
+  run(`getSetting('test_mode','FALSE')`) === 'TRUE');
+
+// 後片付け（あとのテストに影響させない）
+run(`(function(){
+  var s1=findRow(SHEETS.STAFF,{'staff_id':'STF001'});updateRow(SHEETS.STAFF,s1._row,{'line_user_id':'U_FUJI'});
+  var s2=findRow(SHEETS.STAFF,{'staff_id':'STF002'});updateRow(SHEETS.STAFF,s2._row,{'line_user_id':'U_HATT'});
+  var r=findRow(SHEETS.SETTING,{'キー':'test_mode'});updateRow(SHEETS.SETTING,r._row,{'値':'FALSE'});
+  clearSettingCache();
+})()`);
+
 console.log('\n=== T18 GAS貼り付け用の全部入りファイル ===');
 // 1万行のコピーは静かに切れる。切れたまま動くのがいちばん厄介なので、
 // 貼った本人がその場で気づけるかを確かめる

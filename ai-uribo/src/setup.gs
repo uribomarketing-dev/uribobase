@@ -261,8 +261,22 @@ function quickStart() {
   if (paste.total) lines.push(paste.message);
   lines.push(safely_(proc, function () { return initSheets(); }, '台帳の作成に失敗しました'));
 
-  // 設定作業中に現場へ誤送信しないよう、最初はテストモードで始める
+  // 設定作業中に現場へ誤送信しないよう、最初はテストモードで始める。
+  //
+  // 2026-09-21、本番運用中に「貼り付けを確認する」ついでに quickStart を
+  // もう一度実行したところ、ここが無条件にテストモードへ戻し、本番のLINE送信が
+  // 止まっていたことが分かった（気づくまで、実際には送っていなかった）。
+  // 既にLINE登録済みのスタッフがいる＝もう現場で使われている、という意味なので、
+  // その場合はテストモードに触らない。
   safely_(proc, function () {
+    var alreadyLive = findRows(SHEETS.STAFF, function (r) {
+      return isTrue_(r['有効']) && String(r['line_user_id'] || '').trim();
+    }).length > 0;
+    if (alreadyLive) {
+      lines.push('既にLINE登録済みのスタッフがいるため、テストモードの設定はそのままにしました'
+        + '（現在: ' + getSetting('test_mode', 'FALSE') + '）');
+      return;
+    }
     var row = findRow(SHEETS.SETTING, { 'キー': 'test_mode' });
     if (row) updateRow(SHEETS.SETTING, row._row, { '値': 'TRUE' });
     clearSettingCache();
