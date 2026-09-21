@@ -1830,8 +1830,8 @@ pushes.length = 0;
 const stReport = run('selfTest()');
 check('全項目が通り、レポートが返る',
   String(stReport).indexOf('すべて通りました') > 0, String(stReport).substring(0, 600));
-check('試験中はテストモードにする（現場にLINEを飛ばさない）',
-  pushes.length === 0 && run(`getSetting('test_mode')`) === 'TRUE', pushes.length);
+check('試験中は現場にLINEを飛ばさない（実際に送っていない）',
+  pushes.length === 0, pushes.length);
 check('LINEのトークンが生きているかを、送信せずに確かめる',
   String(stReport).indexOf('LINEの接続：つながりました') > 0, String(stReport).substring(0, 400));
 check('試験で作った行は後片付けされる',
@@ -1839,8 +1839,24 @@ check('試験で作った行は後片付けされる',
     && !rows('GAP').some(g => String(g.gap_id).indexOf('ZZ_SELFTEST') >= 0)
     && !rows('USER').some(u => String(u.user_code).indexOf('ZZ_SELFTEST') >= 0),
   rows('GAP').filter(g => String(g.gap_id).indexOf('ZZ_SELFTEST') >= 0));
-check('終わってもテストモードは戻さない（勝手に本番へ切り替えない）',
-  String(stReport).indexOf('テストモードはONのままです') > 0);
+check('終わったら試験前の状態（本番運用中）に戻す',
+  String(stReport).indexOf('本番運用中）に戻しました') > 0
+    && run(`getSetting('test_mode')`) === 'FALSE',
+  [stReport.substring(0, 400), run(`getSetting('test_mode')`)]);
+
+// 試験前がテストモードのままだったときは、そのまま（本番へ切り替えたりしない）
+run(`(function(){
+  var r=findRow(SHEETS.SETTING,{'キー':'test_mode'});updateRow(SHEETS.SETTING,r._row,{'値':'TRUE'});
+  clearSettingCache();
+})()`);
+const stReport2 = run('selfTest()');
+check('試験前からテストモードだった場合は、そのままにする',
+  String(stReport2).indexOf('試験前からONでした') > 0
+    && run(`getSetting('test_mode')`) === 'TRUE');
+run(`(function(){
+  var r=findRow(SHEETS.SETTING,{'キー':'test_mode'});updateRow(SHEETS.SETTING,r._row,{'値':'FALSE'});
+  clearSettingCache();
+})()`);
 
 // 直すべきことがあれば、直し方まで書いて返す
 sandbox.__lineInfoCode = 401;
